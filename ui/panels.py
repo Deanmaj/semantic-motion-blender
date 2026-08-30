@@ -177,6 +177,28 @@ def _iter_all_animated_ids():
         except Exception:
             pass
 
+    # Inline node trees (world, material, light) — not in bpy.data.node_groups
+    for world in bpy.data.worlds:
+        nt = getattr(world, "node_tree", None)
+        if nt:
+            anim_data = getattr(nt, "animation_data", None)
+            if anim_data and getattr(anim_data, "action", None):
+                yield nt, 'WORLD_NODETREE'
+
+    for mat in bpy.data.materials:
+        nt = getattr(mat, "node_tree", None)
+        if nt:
+            anim_data = getattr(nt, "animation_data", None)
+            if anim_data and getattr(anim_data, "action", None):
+                yield nt, 'MATERIAL_NODETREE'
+
+    for light in bpy.data.lights:
+        nt = getattr(light, "node_tree", None)
+        if nt:
+            anim_data = getattr(nt, "animation_data", None)
+            if anim_data and getattr(anim_data, "action", None):
+                yield nt, 'LIGHT_NODETREE'
+
     # Shape keys live on mesh/curve data
     if hasattr(bpy.data, 'shape_keys'):
         try:
@@ -311,7 +333,21 @@ def draw_live_property(layout, context):
             except Exception:
                 pass
 
-        # Try object's material slots
+            # Try object data's node tree (light/camera node trees)
+            if not id_block:
+                nt = getattr(obj.data, "node_tree", None)
+                if nt:
+                    try:
+                        if "." in data_path:
+                            nt.path_resolve(data_path.rsplit(".", 1)[0])
+                        else:
+                            nt.path_resolve(data_path)
+                        id_block = nt
+                        id_type = 'LIGHT_NODETREE'
+                    except Exception:
+                        pass
+
+        # Try object's material slots and their node trees
         if not id_block:
             for slot in getattr(obj, "material_slots", []):
                 mat = getattr(slot, "material", None)
@@ -326,8 +362,21 @@ def draw_live_property(layout, context):
                         break
                     except Exception:
                         pass
+                    # Try material's node tree
+                    nt = getattr(mat, "node_tree", None)
+                    if nt:
+                        try:
+                            if "." in data_path:
+                                nt.path_resolve(data_path.rsplit(".", 1)[0])
+                            else:
+                                nt.path_resolve(data_path)
+                            id_block = nt
+                            id_type = 'MATERIAL_NODETREE'
+                            break
+                        except Exception:
+                            pass
 
-    # 2. Try world
+    # 2. Try world and world's node tree
     if not id_block:
         world = getattr(context.scene, "world", None)
         if world:
@@ -340,6 +389,19 @@ def draw_live_property(layout, context):
                 id_type = 'WORLD'
             except Exception:
                 pass
+            # Try world's node tree (Easy HDRI, etc.)
+            if not id_block:
+                nt = getattr(world, "node_tree", None)
+                if nt:
+                    try:
+                        if "." in data_path:
+                            nt.path_resolve(data_path.rsplit(".", 1)[0])
+                        else:
+                            nt.path_resolve(data_path)
+                        id_block = nt
+                        id_type = 'WORLD_NODETREE'
+                    except Exception:
+                        pass
 
     # 3. Try scene
     if not id_block:
@@ -430,7 +492,26 @@ def draw_live_property(layout, context):
         )
         key_op.data_path = data_path
         key_op.array_index = array_index
-        key_op.owner_id_name = getattr(id_block, "name", "")
+        # For inline node trees, store the parent's name (world/material/light)
+        # since _resolve_owner_id needs to find bpy.data.worlds[name].node_tree etc.
+        if id_type == 'WORLD_NODETREE':
+            # Find which world owns this node tree
+            for w in bpy.data.worlds:
+                if getattr(w, "node_tree", None) == id_block:
+                    key_op.owner_id_name = w.name
+                    break
+        elif id_type == 'MATERIAL_NODETREE':
+            for m in bpy.data.materials:
+                if getattr(m, "node_tree", None) == id_block:
+                    key_op.owner_id_name = m.name
+                    break
+        elif id_type == 'LIGHT_NODETREE':
+            for l in bpy.data.lights:
+                if getattr(l, "node_tree", None) == id_block:
+                    key_op.owner_id_name = l.name
+                    break
+        else:
+            key_op.owner_id_name = getattr(id_block, "name", "")
         key_op.owner_id_type = id_type
 
         # Auto-keying toggle beside the Key Property button

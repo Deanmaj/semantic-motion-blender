@@ -260,10 +260,24 @@ class SM_OT_KeyProperty(bpy.types.Operator):
         if not owner:
             owner = context.active_object
 
-        if not owner:
-            self.report({'WARNING'}, "No owner data block found.")
-            return {'CANCELLED'}
+        if owner:
+            result = self._try_keyframe(owner, frame)
+            if result:
+                return result
 
+        # 3. Broad search: try all possible owners for this data_path
+        for candidate in _iter_keyframe_candidates(context):
+            if candidate == owner:
+                continue
+            result = self._try_keyframe(candidate, frame)
+            if result:
+                return result
+
+        self.report({'ERROR'}, f"Could not insert keyframe for: {self.data_path}")
+        return {'CANCELLED'}
+
+    def _try_keyframe(self, owner, frame):
+        """Attempt to insert a keyframe on owner. Returns result or None."""
         try:
             owner.keyframe_insert(
                 data_path=self.data_path,
@@ -273,24 +287,83 @@ class SM_OT_KeyProperty(bpy.types.Operator):
             self.report({'INFO'}, f"Keyframe inserted at frame {frame}.")
             return {'FINISHED'}
         except Exception:
-            # Property may not be an array (enums, booleans, single floats) —
-            # retry without index
-            try:
-                owner.keyframe_insert(
-                    data_path=self.data_path,
-                    frame=frame
-                )
-                self.report({'INFO'}, f"Keyframe inserted at frame {frame}.")
-                return {'FINISHED'}
-            except Exception as e:
-                self.report({'ERROR'}, f"Could not insert keyframe: {e}")
-                return {'CANCELLED'}
+            pass
+        # Retry without index (enums, booleans, single floats)
+        try:
+            owner.keyframe_insert(
+                data_path=self.data_path,
+                frame=frame
+            )
+            self.report({'INFO'}, f"Keyframe inserted at frame {frame}.")
+            return {'FINISHED'}
+        except Exception:
+            pass
+        return None
+
+
+def _iter_keyframe_candidates(context):
+    """
+    Yield all possible data blocks that could own an F-curve, in priority order.
+    Covers objects, object data, materials, node trees (inline), worlds, scenes.
+    """
+    obj = getattr(context, "active_object", None)
+
+    # Active object
+    if obj:
+        yield obj
+
+    # Object data (camera, light, mesh, etc.)
+    if obj and getattr(obj, "data", None):
+        yield obj.data
+        # Object data's node tree (e.g. light node tree)
+        nt = getattr(obj.data, "node_tree", None)
+        if nt:
+            yield nt
+
+    # Object's material node trees
+    if obj:
+        for slot in getattr(obj, "material_slots", []):
+            mat = getattr(slot, "material", None)
+            if mat:
+                yield mat
+                nt = getattr(mat, "node_tree", None)
+                if nt:
+                    yield nt
+
+    # World and world node tree
+    scene = getattr(context, "scene", None)
+    if scene:
+        world = getattr(scene, "world", None)
+        if world:
+            yield world
+            nt = getattr(world, "node_tree", None)
+            if nt:
+                yield nt
+        yield scene
+
+    # All selected objects
+    for sel_obj in getattr(context, "selected_objects", []):
+        if sel_obj != obj:
+            yield sel_obj
 
 
 def _resolve_owner_id(id_type, id_name):
-    """Resolve a Blender ID data block by type string and name."""
+    """Resolve a Blender ID data block by type string and name.
+    Supports inline node trees via compound types like WORLD_NODETREE, MATERIAL_NODETREE."""
     if not id_type or not id_name:
         return None
+
+    # Handle inline node tree types
+    if id_type == 'WORLD_NODETREE':
+        world = bpy.data.worlds.get(id_name)
+        return getattr(world, "node_tree", None) if world else None
+    if id_type == 'MATERIAL_NODETREE':
+        mat = bpy.data.materials.get(id_name)
+        return getattr(mat, "node_tree", None) if mat else None
+    if id_type == 'LIGHT_NODETREE':
+        light = bpy.data.lights.get(id_name)
+        return getattr(light, "node_tree", None) if light else None
+
     type_map = {
         'OBJECT': bpy.data.objects,
         'MESH': bpy.data.meshes,
