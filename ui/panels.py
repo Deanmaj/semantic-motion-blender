@@ -754,7 +754,7 @@ class DOPESHEET_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_curve_utilities(self.layout, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
 class DOPESHEET_PT_semantic_motion_3_motion_flow(bpy.types.Panel):
@@ -805,7 +805,7 @@ class VIEW3D_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_curve_utilities(self.layout, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
 class VIEW3D_PT_semantic_motion_3_motion_flow(bpy.types.Panel):
