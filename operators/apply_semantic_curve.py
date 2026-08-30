@@ -267,10 +267,10 @@ class SM_OT_KeyProperty(bpy.types.Operator):
 
 
 class SM_OT_ToggleCurveSolo(bpy.types.Operator):
-    """Solo / Isolate the active F-Curve (hide all other curves, or unhide all if already isolated)"""
+    """Solo / Isolate the selected F-Curves (hide all other curves, or unhide all if already isolated)"""
     bl_idname = "semantic_motion.toggle_curve_solo"
     bl_label = "Solo Curve Graph"
-    bl_description = "Solo/Isolate this curve in the Graph Editor (hide other curves, or unhide all)"
+    bl_description = "Solo/Isolate selected curve(s) in the Graph Editor (hide other curves, or unhide all)"
     bl_options = {'REGISTER', 'UNDO'}
 
     data_path: bpy.props.StringProperty(name="Data Path", default="")
@@ -278,7 +278,7 @@ class SM_OT_ToggleCurveSolo(bpy.types.Operator):
 
     def execute(self, context):
         obj = context.active_object
-        if not obj or not obj.animation_data or not obj.animation_data.action:
+        if not obj or not getattr(obj, "animation_data", None) or not getattr(obj.animation_data, "action", None):
             self.report({'WARNING'}, "No active animation data found.")
             return {'CANCELLED'}
 
@@ -287,37 +287,43 @@ class SM_OT_ToggleCurveSolo(bpy.types.Operator):
             self.report({'WARNING'}, "No F-Curves found.")
             return {'CANCELLED'}
 
-        # Target curve to solo
+        # 1. Collect all explicitly selected curves
+        selected_curves = [fc for fc in all_curves if getattr(fc, "select", False)]
+
+        # Also find target curve from data_path if specified
         target_curve = None
-        for fc in all_curves:
-            if getattr(fc, "data_path", "") == self.data_path and getattr(fc, "array_index", -1) == self.array_index:
-                target_curve = fc
-                break
+        if self.data_path:
+            for fc in all_curves:
+                if getattr(fc, "data_path", "") == self.data_path and getattr(fc, "array_index", -1) == self.array_index:
+                    target_curve = fc
+                    break
 
         if not target_curve:
             target_curve = getattr(context, "active_editable_fcurve", None)
-            if not target_curve and all_curves:
-                target_curve = all_curves[0]
 
-        if not target_curve:
-            self.report({'WARNING'}, "No target curve found.")
-            return {'CANCELLED'}
+        if target_curve and target_curve not in selected_curves:
+            selected_curves.append(target_curve)
 
-        other_curves = [fc for fc in all_curves if fc != target_curve]
-        any_other_hidden = any(getattr(fc, "hide", False) for fc in other_curves)
-        target_hidden = getattr(target_curve, "hide", False)
+        if not selected_curves and all_curves:
+            selected_curves = [all_curves[0]]
 
-        if not target_hidden and any_other_hidden:
-            # Already isolated -> Un-hide ALL curves (reopen everything)
+        unselected_curves = [fc for fc in all_curves if fc not in selected_curves]
+        all_selected_visible = all(not getattr(fc, "hide", False) for fc in selected_curves)
+        any_unselected_hidden = any(getattr(fc, "hide", False) for fc in unselected_curves) if unselected_curves else False
+
+        if all_selected_visible and any_unselected_hidden:
+            # Already soloed -> Un-hide ALL curves (re-open everything)
             for fc in all_curves:
                 fc.hide = False
             self.report({'INFO'}, "Removed curve isolation (all curves visible).")
         else:
-            # Isolate this target curve -> Unhide target, hide other curves
-            target_curve.hide = False
-            for fc in other_curves:
+            # Isolate all selected curves -> Make selected visible, hide unselected
+            for fc in selected_curves:
+                fc.hide = False
+            for fc in unselected_curves:
                 fc.hide = True
-            self.report({'INFO'}, f"Isolated {target_curve.data_path}[{target_curve.array_index}].")
+            count = len(selected_curves)
+            self.report({'INFO'}, f"Soloed {count} selected curve{'s' if count != 1 else ''}.")
 
         # Tag editors for redraw
         for area in getattr(context.screen, "areas", []):

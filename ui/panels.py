@@ -210,17 +210,23 @@ def draw_live_property(layout, context):
 
         channel_label = _fcurve_channel_label(fc, owner)
 
-        # Check isolation / solo status of this curve
+        # Check isolation / solo status of curves
         all_curves = []
         if getattr(obj, "animation_data", None) and getattr(obj.animation_data, "action", None):
             from ..operators.apply_semantic_curve import extract_curves_from_action
             all_curves = extract_curves_from_action(obj.animation_data.action)
 
+        selected_curves = [c for c in all_curves if getattr(c, "select", False)]
+        if fc not in selected_curves:
+            selected_curves.append(fc)
+
+        unselected_curves = [c for c in all_curves if c not in selected_curves]
+        any_unselected_hidden = any(getattr(c, "hide", False) for c in unselected_curves) if unselected_curves else False
         target_hidden = getattr(fc, "hide", False)
-        other_curves = [c for c in all_curves if c != fc]
-        any_other_hidden = any(getattr(c, "hide", False) for c in other_curves)
-        is_soloed = (not target_hidden and any_other_hidden)
-        eye_icon = 'RESTRICT_VIEW_OFF' if not target_hidden else 'RESTRICT_VIEW_ON'
+
+        is_soloed = (not target_hidden and any_unselected_hidden)
+        # Dedicated Blender Eye icons: HIDE_OFF (Open Eye), HIDE_ON (Closed Eye)
+        eye_icon = 'HIDE_OFF' if not target_hidden else 'HIDE_ON'
 
         # Header row: Clean channel name + Eye Solo button + Auto-key toggle
         hdr = box.row(align=True)
