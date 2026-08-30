@@ -228,11 +228,11 @@ def draw_live_property(layout, context):
         # Dedicated Blender Eye icons: HIDE_OFF (Open Eye), HIDE_ON (Closed Eye)
         eye_icon = 'HIDE_OFF' if not target_hidden else 'HIDE_ON'
 
-        # Header row: Clean channel name + Eye Solo button + Auto-key toggle
+        # Header row: Clean channel name + Eye Solo button
         hdr = box.row(align=True)
         hdr.label(text=channel_label, icon='ANIM_DATA')
 
-        # Eye icon placed beside Auto keying icon
+        # Eye icon in the header row
         solo_op = hdr.operator(
             "semantic_motion.toggle_curve_solo",
             text="",
@@ -242,14 +242,7 @@ def draw_live_property(layout, context):
         solo_op.data_path = data_path
         solo_op.array_index = array_index
 
-        hdr.prop(
-            context.scene.tool_settings,
-            "use_keyframe_insert_auto",
-            text="",
-            icon='REC',
-        )
-
-        # Live editable value widget
+        # Live editable value widget + Key Property + Auto-Keying
         val_row = box.row(align=True)
         try:
             val_row.prop(owner, prop_attr, index=array_index, text="")
@@ -267,6 +260,14 @@ def draw_live_property(layout, context):
         )
         key_op.data_path = data_path
         key_op.array_index = array_index
+
+        # Auto-keying toggle beside the Key Property button
+        val_row.prop(
+            context.scene.tool_settings,
+            "use_keyframe_insert_auto",
+            text="",
+            icon='REC',
+        )
 
     except Exception:
         box.label(text=f"{data_path}[{array_index}]", icon='PROPERTIES')
