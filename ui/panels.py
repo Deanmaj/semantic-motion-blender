@@ -1,12 +1,15 @@
 """
 UI Panels for Semantic Motion Add-on.
-Independent top-level collapsible panels. Phase Builder includes live property
-display that mirrors the selected curve's actual property value in real time.
+Independent top-level collapsible panels:
+  1. Phase Builder (Speed Sliders, Live Link, Live Property widget)
+  2. Curve Utilities (Scope, Copy/Paste Ease, 2-line Motion Flow, Anticipation Dip & Overshoot Rebound)
+  3. Natural Motion Descriptor (Natural Language text prompt & presets)
 """
 
 import bpy
 from ..engine.curve_analyzer import analyze_keyframe_pair
 from ..operators.apply_semantic_curve import get_target_fcurves
+from ..properties import update_slider
 from .. import properties
 
 _LAST_SELECTION_SIG = None
@@ -21,16 +24,62 @@ def auto_sync_selection_to_sliders(context, props):
     if properties._IS_SYNCING:
         return
     try:
-        fcurves = get_target_fcurves(context)
-        if not fcurves:
+        # Find candidate fcurves (active fcurve first, or selected editable fcurves)
+        target_fcurve = _get_active_fcurve(context)
+        candidate_fcurves = []
+        if target_fcurve:
+            candidate_fcurves.append(target_fcurve)
+        for fc in get_target_fcurves(context):
+            if fc not in candidate_fcurves:
+                candidate_fcurves.append(fc)
+
+        if not candidate_fcurves:
             return
-        for fc in fcurves:
+
+        for fc in candidate_fcurves:
             keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
             if not keyframes or len(keyframes) < 2:
                 continue
+
             selected_kps = [k for k in keyframes if getattr(k, "select_control_point", False)]
+
+            k0, k1 = None, None
             if len(selected_kps) >= 2:
+                # User selected 2 or more keyframes
                 k0, k1 = selected_kps[0], selected_kps[1]
+            elif len(selected_kps) == 1:
+                # User selected 1 keyframe: pick the interval adjacent to it
+                sel_kp = selected_kps[0]
+                idx = -1
+                for i, kp in enumerate(keyframes):
+                    if kp == sel_kp or (abs(kp.co[0] - sel_kp.co[0]) < 0.001 and abs(kp.co[1] - sel_kp.co[1]) < 0.001):
+                        idx = i
+                        break
+                if idx >= 0:
+                    if idx < len(keyframes) - 1:
+                        k0, k1 = keyframes[idx], keyframes[idx + 1]
+                    elif idx > 0:
+                        k0, k1 = keyframes[idx - 1], keyframes[idx]
+            else:
+                # User selected/clicked the fcurve channel (no explicit keyframes selected)
+                # Find keyframe pair around the current timeline frame
+                curr_frame = getattr(context.scene, "frame_current", 0)
+                prev_kps = [k for k in keyframes if k.co[0] <= curr_frame]
+                next_kps = [k for k in keyframes if k.co[0] > curr_frame]
+                if prev_kps and next_kps:
+                    k0 = prev_kps[-1]
+                    k1 = next_kps[0]
+                elif prev_kps and len(prev_kps) >= 2:
+                    k0 = prev_kps[-2]
+                    k1 = prev_kps[-1]
+                elif next_kps and len(next_kps) >= 2:
+                    k0 = next_kps[0]
+                    k1 = next_kps[1]
+                else:
+                    k0 = keyframes[0]
+                    k1 = keyframes[1]
+
+            if k0 and k1 and k0 != k1:
                 sig = (
                     getattr(fc, "data_path", ""),
                     getattr(fc, "array_index", 0),
@@ -48,6 +97,7 @@ def auto_sync_selection_to_sliders(context, props):
                         props.end_speed = res.get("end_speed", 80.0)
                         props.anticipation_amount = res.get("anticipation_amount", 0.0)
                         props.overshoot_amount = res.get("overshoot_amount_pct", 0.0)
+                        update_slider(props, context)
                     finally:
                         properties._IS_SYNCING = False
                 break
@@ -65,7 +115,7 @@ def _get_active_fcurve(context):
         val = getattr(context, attr, None)
         if val:
             return val if not hasattr(val, "__iter__") else next(iter(val), None)
-    # Fall back: search the active object's action
+    # Fall back: search active object's action
     obj = getattr(context, "active_object", None)
     if obj and obj.animation_data and obj.animation_data.action:
         from ..operators.apply_semantic_curve import extract_curves_from_action
@@ -84,12 +134,10 @@ def _fcurve_channel_label(fc, owner=None):
     data_path = fc.data_path
     array_index = fc.array_index
 
-    # Strip array bracket notation from the tail segment
     tail = data_path.rsplit(".", 1)[-1]
     if "[" in tail:
         tail = tail[:tail.index("[")]
 
-    # Try RNA name lookup
     if owner is not None:
         try:
             rna_prop = owner.bl_rna.properties.get(tail)
@@ -101,7 +149,6 @@ def _fcurve_channel_label(fc, owner=None):
         except Exception:
             pass
 
-    # Fallback: prettify the tail
     pretty = tail.replace("_", " ").title()
     if array_index >= 0 and array_index < len(AXIS):
         return f"{AXIS[array_index]} {pretty}"
@@ -111,8 +158,7 @@ def _fcurve_channel_label(fc, owner=None):
 def draw_live_property(layout, context):
     """
     Render the live value of the active fcurve's property as a native Blender
-    widget (number field, dropdown, colour, etc.).
-    Shows Auto-Key toggle and a manual Key-Here button.
+    widget (number field, dropdown, colour, etc.) without any 'Property:' prefix.
     """
     box = layout.box()
 
@@ -120,16 +166,13 @@ def draw_live_property(layout, context):
     fc = _get_active_fcurve(context)
 
     if not fc or not obj:
-        row = box.row()
-        row.label(text="Property:", icon='PROPERTIES')
-        box.label(text="Select a keyframe channel", icon='INFO')
+        box.label(text="Select an F-Curve Channel", icon='INFO')
         return
 
     data_path = fc.data_path
     array_index = fc.array_index
 
     try:
-        # Resolve the owner object for this data_path
         if "." in data_path:
             owner_path, prop_attr = data_path.rsplit(".", 1)
             owner = obj.path_resolve(owner_path)
@@ -137,15 +180,14 @@ def draw_live_property(layout, context):
             owner = obj
             prop_attr = data_path
 
-        # Strip bracket notation from prop_attr  e.g. location[0] → location
         if "[" in prop_attr:
             prop_attr = prop_attr[:prop_attr.index("[")]
 
         channel_label = _fcurve_channel_label(fc, owner)
 
-        # Header row with label + auto-key toggle
+        # Header row: Clean channel name (no "Property:" prefix) + auto-key toggle
         hdr = box.row(align=True)
-        hdr.label(text=f"Property:  {channel_label}", icon='PROPERTIES')
+        hdr.label(text=channel_label, icon='ANIM_DATA')
         hdr.prop(
             context.scene.tool_settings,
             "use_keyframe_insert_auto",
@@ -158,7 +200,6 @@ def draw_live_property(layout, context):
         try:
             val_row.prop(owner, prop_attr, index=array_index, text="")
         except TypeError:
-            # Property doesn't support array index (e.g. it's a scalar)
             val_row.prop(owner, prop_attr, text="")
 
         # Manual key-here button
@@ -171,9 +212,7 @@ def draw_live_property(layout, context):
         key_op.array_index = array_index
 
     except Exception:
-        # Graceful degradation — show raw path info
-        row = box.row()
-        row.label(text=f"Property: {data_path}[{array_index}]", icon='PROPERTIES')
+        box.label(text=f"{data_path}[{array_index}]", icon='PROPERTIES')
 
 
 # ---------------------------------------------------------------------------
@@ -181,14 +220,14 @@ def draw_live_property(layout, context):
 # ---------------------------------------------------------------------------
 
 def draw_phase_builder(layout, context, props):
-    """Phase Builder panel — speed sliders only, no mode toggle."""
+    """Phase Builder panel — speed sliders, live link, live property widget."""
     auto_sync_selection_to_sliders(context, props)
 
     # Live Link toggle
     layout.prop(props, "live_update", text="Live Link", icon='LINKED')
     layout.separator(factor=0.4)
 
-    # Live Property display
+    # Live Property display (clean property name without 'Property:' tag)
     draw_live_property(layout, context)
     layout.separator(factor=0.6)
 
@@ -221,12 +260,47 @@ def draw_phase_builder(layout, context, props):
     op.force_mode = 'PHASE_BUILDER'
 
 
-def draw_modifiers(layout, props):
+def draw_curve_utilities(layout, context, props):
+    """Curve Utilities panel — Scope, Copy/Paste Ease, 2-line Motion Flow, Dip & Rebound."""
+    auto_sync_selection_to_sliders(context, props)
+
+    layout.prop(props, "target_scope", text="Scope")
+    layout.separator(factor=0.4)
+
+    row = layout.row(align=True)
+    row.operator("semantic_motion.copy_ease",  text="Copy Ease",  icon='COPYDOWN')
+    row.operator("semantic_motion.paste_ease", text="Paste Ease", icon='PASTEDOWN').mode = 'BOTH'
+    if props.has_clipboard:
+        layout.operator("semantic_motion.paste_ease", text="Paste Inverted", icon='ARROW_LEFTRIGHT').mode = 'INVERT'
+
+    layout.separator(factor=0.6)
+    layout.label(text="Motion Flow:", icon='INFO')
+
+    # Break motion flow into two lines to prevent ellipsis truncation
+    desc = props.parsed_description or "Smooth Motion"
+    if " — " in desc:
+        flow_part, style_part = desc.split(" — ", 1)
+        layout.label(text=flow_part)
+        layout.label(text=style_part)
+    elif " → " in desc:
+        start_part, end_part = desc.split(" → ", 1)
+        layout.label(text=f"{start_part} \u2192")
+        layout.label(text=end_part)
+    else:
+        import textwrap
+        lines = textwrap.wrap(desc, width=32)
+        for line in (lines[:2] if lines else [desc]):
+            layout.label(text=line)
+
+    # Modifiers on the bottom side of Curve Utilities
+    layout.separator(factor=0.8)
+    layout.label(text="Modifiers:", icon='MODIFIER')
     layout.prop(props, "anticipation_amount", slider=True, text="Anticipation Dip")
     layout.prop(props, "overshoot_amount",    slider=True, text="Overshoot Rebound")
 
 
 def draw_natural_motion(layout, props):
+    """Natural Motion Descriptor panel — prompt input and presets."""
     layout.label(text="Natural Language Description:", icon='FONT_DATA')
     layout.prop(props, "prompt_text", text="", icon='EDITMODE_HLT')
     layout.separator(factor=0.5)
@@ -247,21 +321,8 @@ def draw_natural_motion(layout, props):
     op.force_mode = 'PROMPT'
 
 
-def draw_curve_utilities(layout, props):
-    layout.prop(props, "target_scope", text="Scope")
-    layout.separator(factor=0.5)
-    row = layout.row(align=True)
-    row.operator("semantic_motion.copy_ease",  text="Copy Ease",  icon='COPYDOWN')
-    row.operator("semantic_motion.paste_ease", text="Paste Ease", icon='PASTEDOWN').mode = 'BOTH'
-    if props.has_clipboard:
-        layout.operator("semantic_motion.paste_ease", text="Paste Inverted", icon='ARROW_LEFTRIGHT').mode = 'INVERT'
-    layout.separator(factor=0.5)
-    layout.label(text="Motion Flow:", icon='INFO')
-    layout.label(text=props.parsed_description)
-
-
 # ===========================================================================
-#  GRAPH EDITOR — 4 independent top-level panels
+#  GRAPH EDITOR — 3 independent collapsible panels in requested order
 # ===========================================================================
 
 class GRAPH_EDITOR_PT_SM_PhaseBuilder(bpy.types.Panel):
@@ -275,16 +336,16 @@ class GRAPH_EDITOR_PT_SM_PhaseBuilder(bpy.types.Panel):
         draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
-class GRAPH_EDITOR_PT_SM_Modifiers(bpy.types.Panel):
+class GRAPH_EDITOR_PT_SM_CurveUtils(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Modifiers (Dip & Rebound)'
+    bl_label       = 'Curve Utilities'
     bl_order       = 1
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_modifiers(self.layout, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
 class GRAPH_EDITOR_PT_SM_NaturalMotion(bpy.types.Panel):
@@ -299,20 +360,8 @@ class GRAPH_EDITOR_PT_SM_NaturalMotion(bpy.types.Panel):
         draw_natural_motion(self.layout, context.scene.semantic_motion)
 
 
-class GRAPH_EDITOR_PT_SM_CurveUtils(bpy.types.Panel):
-    bl_space_type  = 'GRAPH_EDITOR'
-    bl_region_type = 'UI'
-    bl_category    = 'Semantic Motion'
-    bl_label       = 'Curve Utilities'
-    bl_order       = 3
-    bl_options     = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        draw_curve_utilities(self.layout, context.scene.semantic_motion)
-
-
 # ===========================================================================
-#  DOPE SHEET — 4 independent top-level panels
+#  DOPE SHEET — 3 independent collapsible panels in requested order
 # ===========================================================================
 
 class DOPESHEET_PT_SM_PhaseBuilder(bpy.types.Panel):
@@ -326,16 +375,16 @@ class DOPESHEET_PT_SM_PhaseBuilder(bpy.types.Panel):
         draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
-class DOPESHEET_PT_SM_Modifiers(bpy.types.Panel):
+class DOPESHEET_PT_SM_CurveUtils(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Modifiers (Dip & Rebound)'
+    bl_label       = 'Curve Utilities'
     bl_order       = 1
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_modifiers(self.layout, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
 class DOPESHEET_PT_SM_NaturalMotion(bpy.types.Panel):
@@ -350,20 +399,8 @@ class DOPESHEET_PT_SM_NaturalMotion(bpy.types.Panel):
         draw_natural_motion(self.layout, context.scene.semantic_motion)
 
 
-class DOPESHEET_PT_SM_CurveUtils(bpy.types.Panel):
-    bl_space_type  = 'DOPESHEET_EDITOR'
-    bl_region_type = 'UI'
-    bl_category    = 'Semantic Motion'
-    bl_label       = 'Curve Utilities'
-    bl_order       = 3
-    bl_options     = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        draw_curve_utilities(self.layout, context.scene.semantic_motion)
-
-
 # ===========================================================================
-#  3D VIEWPORT — 4 independent top-level panels
+#  3D VIEWPORT — 3 independent collapsible panels in requested order
 # ===========================================================================
 
 class VIEW3D_PT_SM_PhaseBuilder(bpy.types.Panel):
@@ -377,16 +414,16 @@ class VIEW3D_PT_SM_PhaseBuilder(bpy.types.Panel):
         draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
-class VIEW3D_PT_SM_Modifiers(bpy.types.Panel):
+class VIEW3D_PT_SM_CurveUtils(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Modifiers (Dip & Rebound)'
+    bl_label       = 'Curve Utilities'
     bl_order       = 1
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_modifiers(self.layout, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context.scene.semantic_motion)
 
 
 class VIEW3D_PT_SM_NaturalMotion(bpy.types.Panel):
@@ -401,18 +438,6 @@ class VIEW3D_PT_SM_NaturalMotion(bpy.types.Panel):
         draw_natural_motion(self.layout, context.scene.semantic_motion)
 
 
-class VIEW3D_PT_SM_CurveUtils(bpy.types.Panel):
-    bl_space_type  = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category    = 'Semantic Motion'
-    bl_label       = 'Curve Utilities'
-    bl_order       = 3
-    bl_options     = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        draw_curve_utilities(self.layout, context.scene.semantic_motion)
-
-
 # ===========================================================================
 #  Registration
 # ===========================================================================
@@ -420,19 +445,16 @@ class VIEW3D_PT_SM_CurveUtils(bpy.types.Panel):
 classes = (
     # Graph Editor
     GRAPH_EDITOR_PT_SM_PhaseBuilder,
-    GRAPH_EDITOR_PT_SM_Modifiers,
-    GRAPH_EDITOR_PT_SM_NaturalMotion,
     GRAPH_EDITOR_PT_SM_CurveUtils,
+    GRAPH_EDITOR_PT_SM_NaturalMotion,
     # Dope Sheet
     DOPESHEET_PT_SM_PhaseBuilder,
-    DOPESHEET_PT_SM_Modifiers,
-    DOPESHEET_PT_SM_NaturalMotion,
     DOPESHEET_PT_SM_CurveUtils,
+    DOPESHEET_PT_SM_NaturalMotion,
     # 3D Viewport
     VIEW3D_PT_SM_PhaseBuilder,
-    VIEW3D_PT_SM_Modifiers,
-    VIEW3D_PT_SM_NaturalMotion,
     VIEW3D_PT_SM_CurveUtils,
+    VIEW3D_PT_SM_NaturalMotion,
 )
 
 
