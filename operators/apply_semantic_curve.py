@@ -266,10 +266,72 @@ class SM_OT_KeyProperty(bpy.types.Operator):
             return {'CANCELLED'}
 
 
+class SM_OT_ToggleCurveSolo(bpy.types.Operator):
+    """Solo / Isolate the active F-Curve (hide all other curves, or unhide all if already isolated)"""
+    bl_idname = "semantic_motion.toggle_curve_solo"
+    bl_label = "Solo Curve Graph"
+    bl_description = "Solo/Isolate this curve in the Graph Editor (hide other curves, or unhide all)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    data_path: bpy.props.StringProperty(name="Data Path", default="")
+    array_index: bpy.props.IntProperty(name="Array Index", default=-1)
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or not obj.animation_data or not obj.animation_data.action:
+            self.report({'WARNING'}, "No active animation data found.")
+            return {'CANCELLED'}
+
+        all_curves = extract_curves_from_action(obj.animation_data.action)
+        if not all_curves:
+            self.report({'WARNING'}, "No F-Curves found.")
+            return {'CANCELLED'}
+
+        # Target curve to solo
+        target_curve = None
+        for fc in all_curves:
+            if getattr(fc, "data_path", "") == self.data_path and getattr(fc, "array_index", -1) == self.array_index:
+                target_curve = fc
+                break
+
+        if not target_curve:
+            target_curve = getattr(context, "active_editable_fcurve", None)
+            if not target_curve and all_curves:
+                target_curve = all_curves[0]
+
+        if not target_curve:
+            self.report({'WARNING'}, "No target curve found.")
+            return {'CANCELLED'}
+
+        other_curves = [fc for fc in all_curves if fc != target_curve]
+        any_other_hidden = any(getattr(fc, "hide", False) for fc in other_curves)
+        target_hidden = getattr(target_curve, "hide", False)
+
+        if not target_hidden and any_other_hidden:
+            # Already isolated -> Un-hide ALL curves (reopen everything)
+            for fc in all_curves:
+                fc.hide = False
+            self.report({'INFO'}, "Removed curve isolation (all curves visible).")
+        else:
+            # Isolate this target curve -> Unhide target, hide other curves
+            target_curve.hide = False
+            for fc in other_curves:
+                fc.hide = True
+            self.report({'INFO'}, f"Isolated {target_curve.data_path}[{target_curve.array_index}].")
+
+        # Tag editors for redraw
+        for area in getattr(context.screen, "areas", []):
+            if area.type in ('GRAPH_EDITOR', 'DOPESHEET_EDITOR', 'VIEW_3D'):
+                area.tag_redraw()
+
+        return {'FINISHED'}
+
+
 classes = (
     SM_OT_ApplySemanticCurve,
     SM_OT_SetSliderSnap,
     SM_OT_KeyProperty,
+    SM_OT_ToggleCurveSolo,
 )
 
 
@@ -281,3 +343,4 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+

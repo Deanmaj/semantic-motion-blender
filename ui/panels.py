@@ -189,11 +189,32 @@ def draw_live_property(layout, context):
         if "[" in prop_attr:
             prop_attr = prop_attr[:prop_attr.index("[")]
 
-        channel_label = _fcurve_channel_label(fc, owner)
+        # Check isolation / solo status of this curve
+        all_curves = []
+        if obj.animation_data and obj.animation_data.action:
+            from ..operators.apply_semantic_curve import extract_curves_from_action
+            all_curves = extract_curves_from_action(obj.animation_data.action)
 
-        # Header row: Clean channel name + auto-key toggle
+        target_hidden = getattr(fc, "hide", False)
+        other_curves = [c for c in all_curves if c != fc]
+        any_other_hidden = any(getattr(c, "hide", False) for c in other_curves)
+        is_soloed = (not target_hidden and any_other_hidden)
+        eye_icon = 'RESTRICT_VIEW_OFF' if not target_hidden else 'RESTRICT_VIEW_ON'
+
+        # Header row: Clean channel name + Eye Solo button + Auto-key toggle
         hdr = box.row(align=True)
         hdr.label(text=channel_label, icon='ANIM_DATA')
+
+        # Eye icon placed beside Auto keying icon
+        solo_op = hdr.operator(
+            "semantic_motion.toggle_curve_solo",
+            text="",
+            icon=eye_icon,
+            depress=is_soloed,
+        )
+        solo_op.data_path = data_path
+        solo_op.array_index = array_index
+
         hdr.prop(
             context.scene.tool_settings,
             "use_keyframe_insert_auto",
