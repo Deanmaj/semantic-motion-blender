@@ -1,0 +1,15 @@
+# Blender cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Zip builds
+*.zip
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
