@@ -1,16 +1,19 @@
 """
 UI Panels for Semantic Motion Add-on.
-Strict 3-tab collapsible layout:
+Strict 4-tab collapsible layout:
   1. Phase Builder (Speed Sliders, Live Link, Live Property widget)
-  2. Curve Utilities (Scope, Copy/Paste Ease, 2-line Motion Flow, Anticipation Dip & Overshoot Rebound)
-  3. Natural Motion Descriptor (Natural Language text prompt & presets)
+  2. Curve Utilities (Scope, Copy/Paste Ease, Anticipation Dip & Overshoot Rebound)
+  3. Motion Graph (Graphical Curve Preview & Non-truncated Line-by-Line Motion Flow)
+  4. Natural Motion Descriptor (Natural Language text prompt & presets)
 
-Features background selection timer for instantaneous auto-updating of speed sliders
-when 2 keyframes or an F-curve interval is selected.
+Features background selection timer for instantaneous auto-updating of speed sliders,
+dip, rebound, and motion flow when 2 keyframes are selected.
 """
 
 import bpy
 from ..engine.curve_analyzer import analyze_keyframe_pair
+from ..engine.bezier_math import motion_tools_slider_to_bezier
+from .curve_preview import render_high_res_curve
 from ..operators.apply_semantic_curve import get_target_fcurves
 from ..properties import update_slider
 from .. import properties
@@ -24,7 +27,8 @@ _LAST_SELECTION_SIG = None
 
 def sync_selected_keyframe_pair(context, props):
     """
-    Reads selected keyframes and automatically updates Start & End speed sliders.
+    Reads selected keyframes and automatically updates Start & End speed sliders,
+    Anticipation Dip, Overshoot Rebound, and Motion Flow.
     Only updates when at least 2 keyframes are selected so that start (k0) and
     end (k1) can be definitively ordered by time.
     """
@@ -49,13 +53,19 @@ def sync_selected_keyframe_pair(context, props):
             if not keyframes or len(keyframes) < 2:
                 continue
 
-            selected_kps = [k for k in keyframes if getattr(k, "select_control_point", False)]
+            # Detect keyframes where point or handles are selected
+            selected_kps = [
+                k for k in keyframes
+                if getattr(k, "select_control_point", False)
+                or getattr(k, "select_left_handle", False)
+                or getattr(k, "select_right_handle", False)
+            ]
 
-            # Only proceed if 2 or more keyframes are selected
+            # Strictly require 2 or more selected keyframes
             if len(selected_kps) < 2:
                 continue
 
-            # Sort by frame position so k0 is strictly start and k1 is strictly end
+            # Sort chronologically: k0 is strictly start, k1 is strictly end
             selected_kps = sorted(selected_kps, key=lambda kp: kp.co[0])
             k0 = selected_kps[0]
             k1 = selected_kps[1]
@@ -254,7 +264,7 @@ def draw_phase_builder(layout, context, props):
 
 
 def draw_curve_utilities(layout, context, props):
-    """Curve Utilities panel — Scope, Copy/Paste Ease, 2-line Motion Flow, Dip & Rebound."""
+    """Curve Utilities panel — Scope, Copy/Paste Ease, Dip & Rebound modifiers."""
     layout.prop(props, "target_scope", text="Scope")
     layout.separator(factor=0.4)
 
@@ -264,30 +274,65 @@ def draw_curve_utilities(layout, context, props):
     if props.has_clipboard:
         layout.operator("semantic_motion.paste_ease", text="Paste Inverted", icon='ARROW_LEFTRIGHT').mode = 'INVERT'
 
-    layout.separator(factor=0.6)
-    layout.label(text="Motion Flow:", icon='INFO')
-
-    # 2-line motion flow breakdown so it never truncates with ellipses
-    desc = props.parsed_description or "Smooth Motion"
-    if " — " in desc:
-        flow_part, style_part = desc.split(" — ", 1)
-        layout.label(text=flow_part)
-        layout.label(text=style_part)
-    elif " → " in desc:
-        start_part, end_part = desc.split(" → ", 1)
-        layout.label(text=f"{start_part} \u2192")
-        layout.label(text=end_part)
-    else:
-        import textwrap
-        lines = textwrap.wrap(desc, width=32)
-        for line in (lines[:2] if lines else [desc]):
-            layout.label(text=line)
-
-    # Modifiers on the bottom side of Curve Utilities
+    # Modifiers on bottom side of Curve Utilities
     layout.separator(factor=0.8)
     layout.label(text="Modifiers:", icon='MODIFIER')
     layout.prop(props, "anticipation_amount", slider=True, text="Anticipation Dip")
     layout.prop(props, "overshoot_amount",    slider=True, text="Overshoot Rebound")
+
+
+def draw_motion_graph(layout, props):
+    """Motion Graph panel — Graphical Curve Preview & Detailed Line-by-Line Motion Flow."""
+    # 1. Un-commented Graphical Curve Preview
+    try:
+        bezier = motion_tools_slider_to_bezier(
+            props.start_speed,
+            props.end_speed,
+            props.anticipation_amount / 100.0,
+            props.overshoot_amount / 100.0
+        )
+        graph_lines = render_high_res_curve(bezier, char_width=20, char_height=5)
+        graph_box = layout.box()
+        col = graph_box.column(align=True)
+        col.scale_y = 0.75
+        for line in graph_lines:
+            col.label(text=line)
+    except Exception:
+        pass
+
+    layout.separator(factor=0.5)
+
+    # 2. Detailed Non-Truncated Motion Flow Breakdown (Each value on its own dedicated line)
+    flow_box = layout.box()
+    flow_box.label(text="Motion Flow Breakdown:", icon='INFO')
+
+    s = int(props.start_speed)
+    e = int(props.end_speed)
+
+    s_txt = f"Slow Start ({s}%)" if s <= 35 else (f"Steady Start ({s}%)" if s <= 65 else f"Fast Start ({s}%)")
+    e_txt = f"Slow End ({e}%)" if e <= 35 else (f"Steady End ({e}%)" if e <= 65 else f"Fast End ({e}%)")
+
+    if s <= 35 and e >= 65:
+        traj = "Accelerating / Rocket Surge"
+    elif s >= 65 and e <= 35:
+        traj = "Decelerating / High-Speed Brake"
+    elif s <= 35 and e <= 35:
+        traj = "Smooth S-Curve (Gentle Departure & Landing)"
+    elif s >= 65 and e >= 65:
+        traj = "Fast Surge / Explosive Punch"
+    else:
+        traj = "Steady Linear Progression"
+
+    flow_col = flow_box.column(align=True)
+    flow_col.label(text=f"• Start Speed: {s_txt}", icon='IPO_EASE_IN')
+    flow_col.label(text=f"• End Speed: {e_txt}", icon='IPO_EASE_OUT')
+    flow_col.label(text=f"• Trajectory: {traj}", icon='FORWARD')
+
+    if props.anticipation_amount > 0.5:
+        flow_col.label(text=f"• Anticipation: Dip ({int(props.anticipation_amount)}% pullback)", icon='IPO_BACK')
+
+    if props.overshoot_amount > 0.5:
+        flow_col.label(text=f"• Overshoot: Rebound (+{int(props.overshoot_amount)}% rebound)", icon='IPO_BACK')
 
 
 def draw_natural_motion(layout, props):
@@ -313,7 +358,7 @@ def draw_natural_motion(layout, props):
 
 
 # ===========================================================================
-#  GRAPH EDITOR — Explicitly ordered panels (1_phase_builder, 2_curve_utils, 3_natural_motion)
+#  GRAPH EDITOR — Explicitly ordered panels
 # ===========================================================================
 
 class GRAPH_EDITOR_PT_semantic_motion_1_phase_builder(bpy.types.Panel):
@@ -339,12 +384,24 @@ class GRAPH_EDITOR_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
         draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
-class GRAPH_EDITOR_PT_semantic_motion_3_natural_motion(bpy.types.Panel):
+class GRAPH_EDITOR_PT_semantic_motion_3_motion_graph(bpy.types.Panel):
+    bl_space_type  = 'GRAPH_EDITOR'
+    bl_region_type = 'UI'
+    bl_category    = 'Semantic Motion'
+    bl_label       = 'Motion Graph'
+    bl_order       = 2
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        draw_motion_graph(self.layout, context.scene.semantic_motion)
+
+
+class GRAPH_EDITOR_PT_semantic_motion_4_natural_motion(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
     bl_label       = 'Natural Motion Descriptor'
-    bl_order       = 2
+    bl_order       = 3
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -378,12 +435,24 @@ class DOPESHEET_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
         draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
-class DOPESHEET_PT_semantic_motion_3_natural_motion(bpy.types.Panel):
+class DOPESHEET_PT_semantic_motion_3_motion_graph(bpy.types.Panel):
+    bl_space_type  = 'DOPESHEET_EDITOR'
+    bl_region_type = 'UI'
+    bl_category    = 'Semantic Motion'
+    bl_label       = 'Motion Graph'
+    bl_order       = 2
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        draw_motion_graph(self.layout, context.scene.semantic_motion)
+
+
+class DOPESHEET_PT_semantic_motion_4_natural_motion(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
     bl_label       = 'Natural Motion Descriptor'
-    bl_order       = 2
+    bl_order       = 3
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -414,15 +483,27 @@ class VIEW3D_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context.scene.semantic_motion)
 
 
-class VIEW3D_PT_semantic_motion_3_natural_motion(bpy.types.Panel):
+class VIEW3D_PT_semantic_motion_3_motion_graph(bpy.types.Panel):
+    bl_space_type  = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category    = 'Semantic Motion'
+    bl_label       = 'Motion Graph'
+    bl_order       = 2
+    bl_options     = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        draw_motion_graph(self.layout, context.scene.semantic_motion)
+
+
+class VIEW3D_PT_semantic_motion_4_natural_motion(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
     bl_label       = 'Natural Motion Descriptor'
-    bl_order       = 2
+    bl_order       = 3
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -437,15 +518,18 @@ classes = (
     # Graph Editor
     GRAPH_EDITOR_PT_semantic_motion_1_phase_builder,
     GRAPH_EDITOR_PT_semantic_motion_2_curve_utils,
-    GRAPH_EDITOR_PT_semantic_motion_3_natural_motion,
+    GRAPH_EDITOR_PT_semantic_motion_3_motion_graph,
+    GRAPH_EDITOR_PT_semantic_motion_4_natural_motion,
     # Dope Sheet
     DOPESHEET_PT_semantic_motion_1_phase_builder,
     DOPESHEET_PT_semantic_motion_2_curve_utils,
-    DOPESHEET_PT_semantic_motion_3_natural_motion,
+    DOPESHEET_PT_semantic_motion_3_motion_graph,
+    DOPESHEET_PT_semantic_motion_4_natural_motion,
     # 3D Viewport
     VIEW3D_PT_semantic_motion_1_phase_builder,
     VIEW3D_PT_semantic_motion_2_curve_utils,
-    VIEW3D_PT_semantic_motion_3_natural_motion,
+    VIEW3D_PT_semantic_motion_3_motion_graph,
+    VIEW3D_PT_semantic_motion_4_natural_motion,
 )
 
 
