@@ -1,7 +1,7 @@
 """
 UI Panels for Semantic Motion Add-on.
-Each section is a fully independent top-level collapsible panel within the
-'Semantic Motion' N-panel tab — no nesting, no parent panel.
+Independent top-level collapsible panels. Phase Builder includes live property
+display that mirrors the selected curve's actual property value in real time.
 """
 
 import bpy
@@ -56,47 +56,174 @@ def auto_sync_selection_to_sliders(context, props):
 
 
 # ---------------------------------------------------------------------------
+# Property display helper
+# ---------------------------------------------------------------------------
+
+def _get_active_fcurve(context):
+    """Return the active or first selected editable fcurve, or None."""
+    for attr in ("active_editable_fcurve", "selected_editable_fcurves"):
+        val = getattr(context, attr, None)
+        if val:
+            return val if not hasattr(val, "__iter__") else next(iter(val), None)
+    # Fall back: search the active object's action
+    obj = getattr(context, "active_object", None)
+    if obj and obj.animation_data and obj.animation_data.action:
+        from ..operators.apply_semantic_curve import extract_curves_from_action
+        for fc in extract_curves_from_action(obj.animation_data.action):
+            if getattr(fc, "select", False):
+                return fc
+    return None
+
+
+def _fcurve_channel_label(fc, owner=None):
+    """
+    Build a human-readable label for an fcurve, e.g. 'Z Euler Rotation'.
+    Uses RNA metadata when available, falls back to a prettified data_path.
+    """
+    AXIS = ["X", "Y", "Z", "W"]
+    data_path = fc.data_path
+    array_index = fc.array_index
+
+    # Strip array bracket notation from the tail segment
+    tail = data_path.rsplit(".", 1)[-1]
+    if "[" in tail:
+        tail = tail[:tail.index("[")]
+
+    # Try RNA name lookup
+    if owner is not None:
+        try:
+            rna_prop = owner.bl_rna.properties.get(tail)
+            if rna_prop:
+                base = rna_prop.name
+                if getattr(rna_prop, "array_length", 0) > 1 and array_index < len(AXIS):
+                    return f"{AXIS[array_index]} {base}"
+                return base
+        except Exception:
+            pass
+
+    # Fallback: prettify the tail
+    pretty = tail.replace("_", " ").title()
+    if array_index >= 0 and array_index < len(AXIS):
+        return f"{AXIS[array_index]} {pretty}"
+    return pretty
+
+
+def draw_live_property(layout, context):
+    """
+    Render the live value of the active fcurve's property as a native Blender
+    widget (number field, dropdown, colour, etc.).
+    Shows Auto-Key toggle and a manual Key-Here button.
+    """
+    box = layout.box()
+
+    obj = getattr(context, "active_object", None)
+    fc = _get_active_fcurve(context)
+
+    if not fc or not obj:
+        row = box.row()
+        row.label(text="Property:", icon='PROPERTIES')
+        box.label(text="Select a keyframe channel", icon='INFO')
+        return
+
+    data_path = fc.data_path
+    array_index = fc.array_index
+
+    try:
+        # Resolve the owner object for this data_path
+        if "." in data_path:
+            owner_path, prop_attr = data_path.rsplit(".", 1)
+            owner = obj.path_resolve(owner_path)
+        else:
+            owner = obj
+            prop_attr = data_path
+
+        # Strip bracket notation from prop_attr  e.g. location[0] → location
+        if "[" in prop_attr:
+            prop_attr = prop_attr[:prop_attr.index("[")]
+
+        channel_label = _fcurve_channel_label(fc, owner)
+
+        # Header row with label + auto-key toggle
+        hdr = box.row(align=True)
+        hdr.label(text=f"Property:  {channel_label}", icon='PROPERTIES')
+        hdr.prop(
+            context.scene.tool_settings,
+            "use_keyframe_insert_auto",
+            text="",
+            icon='REC',
+        )
+
+        # Live editable value widget
+        val_row = box.row(align=True)
+        try:
+            val_row.prop(owner, prop_attr, index=array_index, text="")
+        except TypeError:
+            # Property doesn't support array index (e.g. it's a scalar)
+            val_row.prop(owner, prop_attr, text="")
+
+        # Manual key-here button
+        key_op = val_row.operator(
+            "semantic_motion.key_property",
+            text="",
+            icon='KEY_HLT',
+        )
+        key_op.data_path = data_path
+        key_op.array_index = array_index
+
+    except Exception:
+        # Graceful degradation — show raw path info
+        row = box.row()
+        row.label(text=f"Property: {data_path}[{array_index}]", icon='PROPERTIES')
+
+
+# ---------------------------------------------------------------------------
 # Shared draw helpers
 # ---------------------------------------------------------------------------
 
-def draw_speed_sliders(layout, context, props):
+def draw_phase_builder(layout, context, props):
+    """Phase Builder panel — speed sliders only, no mode toggle."""
     auto_sync_selection_to_sliders(context, props)
 
-    row = layout.row(align=True)
-    row.prop(props, "input_mode", expand=True)
-    layout.prop(props, "live_update", text="Live Auto-Update", icon='AUTO')
-    layout.separator(factor=0.5)
+    # Live Link toggle
+    layout.prop(props, "live_update", text="Live Link", icon='LINKED')
+    layout.separator(factor=0.4)
 
-    if props.input_mode == 'PHASE_BUILDER':
-        layout.label(text="Start Speed  (0% Slow \u2192 100% Fast):", icon='IPO_EASE_IN')
-        snap_s = layout.row(align=True)
-        snap_s.scale_y = 0.8
-        for lbl, val in [("0%", 0.0), ("25%", 25.0), ("50%", 50.0), ("75%", 75.0), ("100%", 100.0)]:
-            op = snap_s.operator("semantic_motion.set_tension_snap", text=lbl)
-            op.target = 'START'
-            op.value = val
-        layout.prop(props, "start_speed", text="", slider=True)
+    # Live Property display
+    draw_live_property(layout, context)
+    layout.separator(factor=0.6)
 
-        layout.separator(factor=0.8)
+    # --- START SPEED ---
+    layout.label(text="Start Speed  (0%  Slow \u2192  100%  Fast):", icon='IPO_EASE_IN')
+    snap_s = layout.row(align=True)
+    snap_s.scale_y = 0.8
+    for lbl, val in [("0%", 0.0), ("25%", 25.0), ("50%", 50.0), ("75%", 75.0), ("100%", 100.0)]:
+        op = snap_s.operator("semantic_motion.set_tension_snap", text=lbl)
+        op.target = 'START'
+        op.value = val
+    layout.prop(props, "start_speed", text="", slider=True)
 
-        layout.label(text="End Speed  (0% Slow \u2192 100% Fast):", icon='IPO_EASE_OUT')
-        snap_e = layout.row(align=True)
-        snap_e.scale_y = 0.8
-        for lbl, val in [("0%", 0.0), ("25%", 25.0), ("50%", 50.0), ("75%", 75.0), ("100%", 100.0)]:
-            op = snap_e.operator("semantic_motion.set_tension_snap", text=lbl)
-            op.target = 'END'
-            op.value = val
-        layout.prop(props, "end_speed", text="", slider=True)
+    layout.separator(factor=0.8)
+
+    # --- END SPEED ---
+    layout.label(text="End Speed  (0%  Slow \u2192  100%  Fast):", icon='IPO_EASE_OUT')
+    snap_e = layout.row(align=True)
+    snap_e.scale_y = 0.8
+    for lbl, val in [("0%", 0.0), ("25%", 25.0), ("50%", 50.0), ("75%", 75.0), ("100%", 100.0)]:
+        op = snap_e.operator("semantic_motion.set_tension_snap", text=lbl)
+        op.target = 'END'
+        op.value = val
+    layout.prop(props, "end_speed", text="", slider=True)
 
     layout.separator()
-    row = layout.row(align=True)
-    row.scale_y = 1.25
-    row.operator("semantic_motion.apply_curve", text="Apply Motion to Keys", icon='CHECKMARK')
+    apply_row = layout.row(align=True)
+    apply_row.scale_y = 1.25
+    op = apply_row.operator("semantic_motion.apply_curve", text="Apply Motion to Keys", icon='CHECKMARK')
+    op.force_mode = 'PHASE_BUILDER'
 
 
 def draw_modifiers(layout, props):
     layout.prop(props, "anticipation_amount", slider=True, text="Anticipation Dip")
-    layout.prop(props, "overshoot_amount", slider=True, text="Overshoot Rebound")
+    layout.prop(props, "overshoot_amount",    slider=True, text="Overshoot Rebound")
 
 
 def draw_natural_motion(layout, props):
@@ -105,18 +232,19 @@ def draw_natural_motion(layout, props):
     layout.separator(factor=0.5)
     layout.label(text="One-Click Recipes:", icon='BOOKMARKS')
     grid = layout.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=False, align=True)
-    grid.operator("semantic_motion.apply_preset", text="Slow Start, Fast End",     icon='FORWARD'    ).preset_name = "slow start, fast ending"
-    grid.operator("semantic_motion.apply_preset", text="Fast Start, Slow End",     icon='BACK'       ).preset_name = "fast start, slow ending"
-    grid.operator("semantic_motion.apply_preset", text="Smooth S-Curve",           icon='SPHERE'     ).preset_name = "slow start, slow ending"
-    grid.operator("semantic_motion.apply_preset", text="Anticipate \u2192 Overshoot", icon='IPO_BACK').preset_name = "anticipation to overshoot"
-    grid.operator("semantic_motion.apply_preset", text="Explosive Blast",          icon='LIGHT_SUN'  ).preset_name = "explosive with overshoot"
-    grid.operator("semantic_motion.apply_preset", text="Physics Bounce (30)",      icon='IPO_BOUNCE' ).preset_name = "drop and bounce with 30 rebounds"
-    grid.operator("semantic_motion.apply_preset", text="Elastic Wobble",           icon='IPO_ELASTIC').preset_name = "elastic wobble"
-    grid.operator("semantic_motion.apply_preset", text="Linear Constant",          icon='IPO_LINEAR' ).preset_name = "linear"
+    grid.operator("semantic_motion.apply_preset", text="Slow Start, Fast End",      icon='FORWARD'    ).preset_name = "slow start, fast ending"
+    grid.operator("semantic_motion.apply_preset", text="Fast Start, Slow End",      icon='BACK'       ).preset_name = "fast start, slow ending"
+    grid.operator("semantic_motion.apply_preset", text="Smooth S-Curve",            icon='SPHERE'     ).preset_name = "slow start, slow ending"
+    grid.operator("semantic_motion.apply_preset", text="Anticipate \u2192 Overshoot", icon='IPO_BACK' ).preset_name = "anticipation to overshoot"
+    grid.operator("semantic_motion.apply_preset", text="Explosive Blast",           icon='LIGHT_SUN'  ).preset_name = "explosive with overshoot"
+    grid.operator("semantic_motion.apply_preset", text="Physics Bounce (30)",       icon='IPO_BOUNCE' ).preset_name = "drop and bounce with 30 rebounds"
+    grid.operator("semantic_motion.apply_preset", text="Elastic Wobble",            icon='IPO_ELASTIC').preset_name = "elastic wobble"
+    grid.operator("semantic_motion.apply_preset", text="Linear Constant",           icon='IPO_LINEAR' ).preset_name = "linear"
     layout.separator()
-    row = layout.row(align=True)
-    row.scale_y = 1.25
-    row.operator("semantic_motion.apply_curve", text="Apply Motion to Keys", icon='CHECKMARK')
+    apply_row = layout.row(align=True)
+    apply_row.scale_y = 1.25
+    op = apply_row.operator("semantic_motion.apply_curve", text="Apply Motion to Keys", icon='CHECKMARK')
+    op.force_mode = 'PROMPT'
 
 
 def draw_curve_utilities(layout, props):
@@ -133,18 +261,18 @@ def draw_curve_utilities(layout, props):
 
 
 # ===========================================================================
-#  GRAPH EDITOR — 4 independent top-level panels, same category tab
+#  GRAPH EDITOR — 4 independent top-level panels
 # ===========================================================================
 
-class GRAPH_EDITOR_PT_SM_SpeedSliders(bpy.types.Panel):
+class GRAPH_EDITOR_PT_SM_PhaseBuilder(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Speed Sliders'
+    bl_label       = 'Phase Builder'
     bl_order       = 0
 
     def draw(self, context):
-        draw_speed_sliders(self.layout, context, context.scene.semantic_motion)
+        draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
 class GRAPH_EDITOR_PT_SM_Modifiers(bpy.types.Panel):
@@ -187,15 +315,15 @@ class GRAPH_EDITOR_PT_SM_CurveUtils(bpy.types.Panel):
 #  DOPE SHEET — 4 independent top-level panels
 # ===========================================================================
 
-class DOPESHEET_PT_SM_SpeedSliders(bpy.types.Panel):
+class DOPESHEET_PT_SM_PhaseBuilder(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Speed Sliders'
+    bl_label       = 'Phase Builder'
     bl_order       = 0
 
     def draw(self, context):
-        draw_speed_sliders(self.layout, context, context.scene.semantic_motion)
+        draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
 class DOPESHEET_PT_SM_Modifiers(bpy.types.Panel):
@@ -238,15 +366,15 @@ class DOPESHEET_PT_SM_CurveUtils(bpy.types.Panel):
 #  3D VIEWPORT — 4 independent top-level panels
 # ===========================================================================
 
-class VIEW3D_PT_SM_SpeedSliders(bpy.types.Panel):
+class VIEW3D_PT_SM_PhaseBuilder(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Speed Sliders'
+    bl_label       = 'Phase Builder'
     bl_order       = 0
 
     def draw(self, context):
-        draw_speed_sliders(self.layout, context, context.scene.semantic_motion)
+        draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
 class VIEW3D_PT_SM_Modifiers(bpy.types.Panel):
@@ -291,17 +419,17 @@ class VIEW3D_PT_SM_CurveUtils(bpy.types.Panel):
 
 classes = (
     # Graph Editor
-    GRAPH_EDITOR_PT_SM_SpeedSliders,
+    GRAPH_EDITOR_PT_SM_PhaseBuilder,
     GRAPH_EDITOR_PT_SM_Modifiers,
     GRAPH_EDITOR_PT_SM_NaturalMotion,
     GRAPH_EDITOR_PT_SM_CurveUtils,
     # Dope Sheet
-    DOPESHEET_PT_SM_SpeedSliders,
+    DOPESHEET_PT_SM_PhaseBuilder,
     DOPESHEET_PT_SM_Modifiers,
     DOPESHEET_PT_SM_NaturalMotion,
     DOPESHEET_PT_SM_CurveUtils,
     # 3D Viewport
-    VIEW3D_PT_SM_SpeedSliders,
+    VIEW3D_PT_SM_PhaseBuilder,
     VIEW3D_PT_SM_Modifiers,
     VIEW3D_PT_SM_NaturalMotion,
     VIEW3D_PT_SM_CurveUtils,

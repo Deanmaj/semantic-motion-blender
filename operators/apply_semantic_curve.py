@@ -181,12 +181,26 @@ class SM_OT_ApplySemanticCurve(bpy.types.Operator):
         default=""
     )
 
+    force_mode: bpy.props.StringProperty(
+        name="Force Mode",
+        description="Override input_mode for this execution: PHASE_BUILDER or PROMPT",
+        default=""
+    )
+
     def execute(self, context):
         props = context.scene.semantic_motion
         if self.custom_prompt:
             props.prompt_text = self.custom_prompt
 
+        original_mode = props.input_mode
+        if self.force_mode in ('PHASE_BUILDER', 'PROMPT'):
+            props.input_mode = self.force_mode
+
         count = apply_motion_tools_curve_to_context(context, props)
+
+        if self.force_mode:
+            props.input_mode = original_mode
+
         if count > 0:
             self.report({'INFO'}, f"Applied motion curve to {count} interval(s).")
             return {'FINISHED'}
@@ -220,9 +234,42 @@ class SM_OT_SetSliderSnap(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SM_OT_KeyProperty(bpy.types.Operator):
+    """Insert a keyframe for the active fcurve property at the current frame"""
+    bl_idname = "semantic_motion.key_property"
+    bl_label = "Key Property"
+    bl_description = "Insert a keyframe for this property at the current timeline position"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    data_path: bpy.props.StringProperty(name="Data Path", default="")
+    array_index: bpy.props.IntProperty(name="Array Index", default=-1)
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj:
+            self.report({'WARNING'}, "No active object.")
+            return {'CANCELLED'}
+        if not self.data_path:
+            self.report({'WARNING'}, "No data path specified.")
+            return {'CANCELLED'}
+        try:
+            frame = context.scene.frame_current
+            obj.keyframe_insert(
+                data_path=self.data_path,
+                index=self.array_index,
+                frame=frame
+            )
+            self.report({'INFO'}, f"Keyframe inserted at frame {frame}.")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not insert keyframe: {e}")
+            return {'CANCELLED'}
+
+
 classes = (
     SM_OT_ApplySemanticCurve,
     SM_OT_SetSliderSnap,
+    SM_OT_KeyProperty,
 )
 
 
