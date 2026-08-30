@@ -1,6 +1,6 @@
 """
 High-Resolution Graphical Curve & Speed Preview for Blender UI.
-Uses a 2x4 Subpixel Braille Canvas (up to 56x32 virtual resolution) to render smooth
+Uses a 2x4 Subpixel Braille Canvas to render smooth
 Value and Speed/Time graphs directly inside the Blender sidebar.
 """
 
@@ -83,16 +83,16 @@ def _pack_braille_lines(pixels: List[List[bool]], char_width: int, char_height: 
                         subgrid[bx][by] = pixels[gx][gy]
             line_chars.append(_braille_char(subgrid))
 
-        prefix = label_dict.get(cy, "          │ ")
+        prefix = label_dict.get(cy, "     │ ")
         lines.append(prefix + "".join(line_chars))
 
-    axis_bar = "          └" + "─" * (char_width // 2) + "┬" + "─" * (char_width - (char_width // 2) - 1) + "┘"
+    axis_bar = "     └" + "─" * (char_width // 2) + "┬" + "─" * (char_width - (char_width // 2) - 1) + "┘"
     lines.append(axis_bar)
     lines.append(bottom_label)
     return lines
 
 
-def render_high_res_curve(bezier: NormalizedBezier, char_width: int = 22, char_height: int = 8) -> List[str]:
+def render_high_res_curve(bezier: NormalizedBezier, char_width: int = 18, char_height: int = 8) -> List[str]:
     """
     Renders the Position / Value Curve Y(t) over Time with vertical depth and subpixel precision.
     """
@@ -106,31 +106,30 @@ def render_high_res_curve(bezier: NormalizedBezier, char_width: int = 22, char_h
 
     pixels = _draw_samples_on_canvas(samples, min_y, max_y, char_width, char_height)
 
-    # Multi-level Y-axis labels
+    # Multi-level compact Y-axis labels
     mid_cy = char_height // 2
     y_labels = [
-        (0, " 100% (End) ┤ "),
-        (mid_cy, "  50% (Mid) ┤ "),
-        (char_height - 1, "0% (Origin) ┤ "),
+        (0, "100% ┤ "),
+        (mid_cy, " 50% ┤ "),
+        (char_height - 1, "  0% ┤ "),
     ]
     if char_height >= 8:
-        y_labels.insert(1, (mid_cy // 2, "        75% ┤ "))
-        y_labels.insert(3, (mid_cy + (char_height - 1 - mid_cy) // 2, "        25% ┤ "))
+        y_labels.insert(1, (mid_cy // 2, " 75% ┤ "))
+        y_labels.insert(3, (mid_cy + (char_height - 1 - mid_cy) // 2, " 25% ┤ "))
 
-    bottom = "            0% (Start)         100% (End)"
+    bottom = "       0% (Start)     100% (End)"
     return _pack_braille_lines(pixels, char_width, char_height, y_labels, bottom)
 
 
-def render_speed_graph(bezier: NormalizedBezier, char_width: int = 22, char_height: int = 8) -> List[str]:
+def render_speed_graph(bezier: NormalizedBezier, char_width: int = 18, char_height: int = 8) -> List[str]:
     """
     Renders the Velocity / Speed Graph (dY/dX over time) with vertical depth and subpixel precision.
-    Shows the acceleration, peak velocity burst, and deceleration deceleration curve.
+    Shows the acceleration, peak velocity burst, and deceleration curve.
     """
     pixel_w = char_width * 2
     num_samples = max(64, pixel_w * 4)
     raw_samples = bezier.sample_curve(num_samples=num_samples)
 
-    # Compute instantaneous velocities dY/dX
     speed_samples = []
     max_speed = 0.001
 
@@ -145,7 +144,6 @@ def render_speed_graph(bezier: NormalizedBezier, char_width: int = 22, char_heig
         if speed > max_speed:
             max_speed = speed
 
-    # Normalize speed into [0, 1] range
     norm_samples = [(x, min(1.0, spd / max_speed)) for x, spd in speed_samples]
     if not norm_samples:
         norm_samples = [(0.0, 0.0), (1.0, 0.0)]
@@ -157,15 +155,15 @@ def render_speed_graph(bezier: NormalizedBezier, char_width: int = 22, char_heig
 
     mid_cy = char_height // 2
     y_labels = [
-        (0, "  Max Speed ┤ "),
-        (mid_cy, "  50% Speed ┤ "),
-        (char_height - 1, "   0 (Rest) ┤ "),
+        (0, " Max ┤ "),
+        (mid_cy, " 50% ┤ "),
+        (char_height - 1, "   0 ┤ "),
     ]
     if char_height >= 8:
-        y_labels.insert(1, (mid_cy // 2, "  75% Speed ┤ "))
-        y_labels.insert(3, (mid_cy + (char_height - 1 - mid_cy) // 2, "  25% Speed ┤ "))
+        y_labels.insert(1, (mid_cy // 2, " 75% ┤ "))
+        y_labels.insert(3, (mid_cy + (char_height - 1 - mid_cy) // 2, " 25% ┤ "))
 
-    bottom = "            0% (Start)         100% (End)"
+    bottom = "       0% (Start)     100% (End)"
     return _pack_braille_lines(pixels, char_width, char_height, y_labels, bottom)
 
 

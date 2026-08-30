@@ -3,7 +3,7 @@ UI Panels for Semantic Motion Add-on.
 Strict 4-tab collapsible layout:
   1. Phase Builder (Speed Sliders, Live Link, Live Property widget)
   2. Curve Utilities (Scope, Copy/Paste Ease, Anticipation Dip & Overshoot Rebound)
-  3. Motion Flow (Clickable Value & Speed Graph Tabs, Vertical Resolution, Detailed Metrics)
+  3. Motion Flow (Clickable Value & Speed Graph Tabs, Vertical Resolution, Direct Flow Metrics)
   4. Natural Motion Descriptor (Natural Language text prompt & presets)
 
 Features background selection timer for instantaneous auto-updating of speed sliders,
@@ -11,6 +11,7 @@ dip, rebound, and motion flow when 2 keyframes are selected.
 """
 
 import bpy
+import textwrap
 from ..engine.curve_analyzer import analyze_keyframe_pair
 from ..engine.bezier_math import motion_tools_slider_to_bezier
 from .curve_preview import render_high_res_curve, render_speed_graph
@@ -297,9 +298,9 @@ def draw_motion_flow(layout, props):
             props.overshoot_amount / 100.0
         )
         if getattr(props, "graph_type", 'VALUE') == 'SPEED':
-            graph_lines = render_speed_graph(bezier, char_width=22, char_height=8)
+            graph_lines = render_speed_graph(bezier, char_width=18, char_height=8)
         else:
-            graph_lines = render_high_res_curve(bezier, char_width=22, char_height=8)
+            graph_lines = render_high_res_curve(bezier, char_width=18, char_height=8)
 
         graph_box = layout.box()
         col = graph_box.column(align=True)
@@ -309,9 +310,9 @@ def draw_motion_flow(layout, props):
     except Exception:
         pass
 
-    layout.separator(factor=0.5)
+    layout.separator(factor=0.4)
 
-    # 3. Detailed Non-Truncated Metrics with Linebreaks
+    # 3. Direct Clean Metrics — No redundant subtitles, dynamic text wrapping
     flow_box = layout.box()
     flow_col = flow_box.column(align=True)
 
@@ -322,29 +323,33 @@ def draw_motion_flow(layout, props):
     e_txt = f"Slow End ({e}%)" if e <= 35 else (f"Steady End ({e}%)" if e <= 65 else f"Fast End ({e}%)")
 
     if s <= 35 and e >= 65:
-        traj = "Accelerating / Rocket Surge"
+        traj_lines = ["Accelerating Launch", "Rocket Surge to Target"]
     elif s >= 65 and e <= 35:
-        traj = "Decelerating / High-Speed Brake"
+        traj_lines = ["Decelerating Arrival", "High-Speed Brake Cushion"]
     elif s <= 35 and e <= 35:
-        traj = "Smooth S-Curve (Gentle Departure & Landing)"
+        traj_lines = ["Smooth S-Curve", "Gentle Departure & Landing"]
     elif s >= 65 and e >= 65:
-        traj = "Fast Surge / Explosive Punch"
+        traj_lines = ["Fast Continuous Surge", "Explosive Punch Through"]
     else:
-        traj = "Steady Linear Progression"
+        traj_lines = ["Steady Linear Progression"]
 
-    flow_col.label(text=f"• Start Speed: {s_txt}", icon='IPO_EASE_IN')
-    flow_col.label(text=f"• End Speed: {e_txt}", icon='IPO_EASE_OUT')
+    # Start and End metrics directly shown without redundant prefixes
+    flow_col.label(text=s_txt, icon='IPO_EASE_IN')
+    flow_col.label(text=e_txt, icon='IPO_EASE_OUT')
 
-    # Trajectory with explicit line break so it never truncates
-    flow_col.label(text="• Trajectory:", icon='FORWARD')
-    traj_row = flow_col.row()
-    traj_row.label(text=f"   {traj}")
+    # Trajectory directly displayed line by line to guarantee zero truncation
+    flow_col.separator(factor=0.3)
+    for i, line in enumerate(traj_lines):
+        flow_col.label(text=line, icon='FORWARD' if i == 0 else 'BLANK1')
 
+    # Modifiers directly displayed when active
     if props.anticipation_amount > 0.5:
-        flow_col.label(text=f"• Anticipation Dip: {int(props.anticipation_amount)}% pullback", icon='IPO_BACK')
+        flow_col.separator(factor=0.3)
+        flow_col.label(text=f"Anticipation Dip ({int(props.anticipation_amount)}%)", icon='IPO_BACK')
 
     if props.overshoot_amount > 0.5:
-        flow_col.label(text=f"• Overshoot Rebound: +{int(props.overshoot_amount)}% overshoot", icon='IPO_BACK')
+        flow_col.separator(factor=0.3)
+        flow_col.label(text=f"Overshoot Rebound (+{int(props.overshoot_amount)}%)", icon='IPO_BACK')
 
 
 def draw_natural_motion(layout, props):
