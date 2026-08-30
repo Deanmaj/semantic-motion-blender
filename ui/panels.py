@@ -1,7 +1,7 @@
 """
 UI Panels for Semantic Motion Add-on.
 Strict 4-tab collapsible layout:
-  1. Phase Builder (Speed Sliders, Live Link, Live Property widget)
+  1. Phase Builder (Speed Sliders, Live Link, Live Property widget with Eye Solo & Auto-Key)
   2. Curve Utilities (Scope, Copy/Paste Ease, Anticipation Dip & Overshoot Rebound)
   3. Motion Flow (Clickable Value & Speed Graph Tabs, Vertical Resolution, Direct Flow Metrics)
   4. Natural Motion Descriptor (Natural Language text prompt & presets)
@@ -118,16 +118,31 @@ def check_selection_timer():
 
 def _get_active_fcurve(context):
     """Return the active or first selected editable fcurve, or None."""
+    # 1. Direct context attributes
     for attr in ("active_editable_fcurve", "selected_editable_fcurves"):
         val = getattr(context, attr, None)
         if val:
-            return val if not hasattr(val, "__iter__") else next(iter(val), None)
+            if hasattr(val, "__iter__"):
+                for item in val:
+                    if item:
+                        return item
+            else:
+                return val
+
+    # 2. Search active object's action
     obj = getattr(context, "active_object", None)
-    if obj and obj.animation_data and obj.animation_data.action:
+    if obj and getattr(obj, "animation_data", None) and getattr(obj.animation_data, "action", None):
         from ..operators.apply_semantic_curve import extract_curves_from_action
-        for fc in extract_curves_from_action(obj.animation_data.action):
+        all_curves = extract_curves_from_action(obj.animation_data.action)
+        for fc in all_curves:
             if getattr(fc, "select", False):
                 return fc
+            kps = getattr(fc, "keyframe_points", getattr(fc, "points", []))
+            if any(getattr(k, "select_control_point", False) for k in kps):
+                return fc
+        if all_curves:
+            return all_curves[0]
+
     return None
 
 
@@ -164,7 +179,7 @@ def _fcurve_channel_label(fc, owner=None):
 def draw_live_property(layout, context):
     """
     Render the live value of the active fcurve's property as a native Blender
-    widget (number field, dropdown, colour, etc.) with NO 'Property:' prefix.
+    widget (number field, dropdown, colour, etc.) with Eye Solo & Auto-Key buttons.
     """
     box = layout.box()
 
@@ -181,7 +196,11 @@ def draw_live_property(layout, context):
     try:
         if "." in data_path:
             owner_path, prop_attr = data_path.rsplit(".", 1)
-            owner = obj.path_resolve(owner_path)
+            try:
+                owner = obj.path_resolve(owner_path)
+            except Exception:
+                owner = obj
+                prop_attr = data_path
         else:
             owner = obj
             prop_attr = data_path
@@ -189,9 +208,11 @@ def draw_live_property(layout, context):
         if "[" in prop_attr:
             prop_attr = prop_attr[:prop_attr.index("[")]
 
+        channel_label = _fcurve_channel_label(fc, owner)
+
         # Check isolation / solo status of this curve
         all_curves = []
-        if obj.animation_data and obj.animation_data.action:
+        if getattr(obj, "animation_data", None) and getattr(obj.animation_data, "action", None):
             from ..operators.apply_semantic_curve import extract_curves_from_action
             all_curves = extract_curves_from_action(obj.animation_data.action)
 
@@ -226,8 +247,11 @@ def draw_live_property(layout, context):
         val_row = box.row(align=True)
         try:
             val_row.prop(owner, prop_attr, index=array_index, text="")
-        except TypeError:
-            val_row.prop(owner, prop_attr, text="")
+        except Exception:
+            try:
+                val_row.prop(owner, prop_attr, text="")
+            except Exception:
+                val_row.label(text=f"Frame: {context.scene.frame_current}")
 
         # Manual key-here button
         key_op = val_row.operator(
