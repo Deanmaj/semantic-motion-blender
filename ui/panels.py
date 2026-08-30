@@ -21,10 +21,11 @@ from .. import properties
 
 
 _LAST_SELECTION_SIG = None
-# Persistent tracked pair — survives handle grabs that deselect control points
-_TRACKED_FC = None          # The fcurve object
-_TRACKED_K0_FRAME = None    # Frame number of first keyframe
-_TRACKED_K1_FRAME = None    # Frame number of second keyframe
+# Persistent tracked keyframe pair identity (stored as primitive data, NEVER live C pointers)
+_TRACKED_DATA_PATH = None
+_TRACKED_ARRAY_INDEX = -1
+_TRACKED_K0_FRAME = None
+_TRACKED_K1_FRAME = None
 
 
 # ---------------------------------------------------------------------------
@@ -32,12 +33,21 @@ _TRACKED_K1_FRAME = None    # Frame number of second keyframe
 # ---------------------------------------------------------------------------
 
 def _find_keyframe_at_frame(fc, frame):
-    """Find a keyframe on the given fcurve at the given frame number (±0.5 tolerance)."""
-    keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
-    for k in keyframes:
-        if abs(k.co[0] - frame) < 0.5:
-            return k
-    return None
+    """Safely find a keyframe on the given fcurve at or closest to the given frame number."""
+    try:
+        keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
+        if not keyframes:
+            return None
+        best_k = None
+        min_dist = 0.75
+        for k in keyframes:
+            dist = abs(k.co[0] - frame)
+            if dist < min_dist:
+                min_dist = dist
+                best_k = k
+        return best_k
+    except Exception:
+        return None
 
 
 def sync_selected_keyframe_pair(context, props):
@@ -45,18 +55,17 @@ def sync_selected_keyframe_pair(context, props):
     Reads selected keyframes and automatically updates Start & End speed sliders,
     Anticipation Dip, Overshoot Rebound, and Motion Flow.
 
-    When 2+ keyframes are selected, uses them as the active pair AND stores them.
-    When fewer are selected (e.g. user is dragging a bezier handle), falls back
-    to the stored pair and keeps updating from their current handle positions.
-    Only clears the stored pair when a genuinely new pair is selected.
+    When 2+ keyframes are selected, uses them as the active pair AND records their identity.
+    When fewer are selected (e.g. user is dragging a bezier handle), safely falls back
+    to the tracked pair by finding the live F-Curve and keyframes freshly from context.
     """
-    global _LAST_SELECTION_SIG, _TRACKED_FC, _TRACKED_K0_FRAME, _TRACKED_K1_FRAME
+    global _LAST_SELECTION_SIG, _TRACKED_DATA_PATH, _TRACKED_ARRAY_INDEX, _TRACKED_K0_FRAME, _TRACKED_K1_FRAME
     if properties._IS_SYNCING:
         return
 
     try:
-        target_fcurve = _get_active_fcurve(context)
         candidate_fcurves = []
+        target_fcurve = _get_active_fcurve(context)
         if target_fcurve:
             candidate_fcurves.append(target_fcurve)
         for fc in get_target_fcurves(context):
@@ -66,57 +75,71 @@ def sync_selected_keyframe_pair(context, props):
         if not candidate_fcurves:
             return
 
-        # --- 1. Try to find a new pair from current selection ---
+        # --- 1. Try to find a new pair from currently selected keyframes ---
         k0 = None
         k1 = None
         active_fc = None
 
         for fc in candidate_fcurves:
-            keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
-            if not keyframes or len(keyframes) < 2:
+            try:
+                keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
+                if not keyframes or len(keyframes) < 2:
+                    continue
+
+                selected_kps = [
+                    k for k in keyframes
+                    if getattr(k, "select_control_point", False)
+                    or getattr(k, "select_left_handle", False)
+                    or getattr(k, "select_right_handle", False)
+                ]
+
+                if len(selected_kps) >= 2:
+                    selected_kps = sorted(selected_kps, key=lambda kp: kp.co[0])
+                    cand_k0 = selected_kps[0]
+                    cand_k1 = selected_kps[-1]
+                    if cand_k0 != cand_k1:
+                        k0 = cand_k0
+                        k1 = cand_k1
+                        active_fc = fc
+                        # Store identity as primitives (strings/floats/ints), NEVER C-struct RNA pointers!
+                        _TRACKED_DATA_PATH = getattr(fc, "data_path", "")
+                        _TRACKED_ARRAY_INDEX = getattr(fc, "array_index", 0)
+                        _TRACKED_K0_FRAME = round(float(k0.co[0]), 2)
+                        _TRACKED_K1_FRAME = round(float(k1.co[0]), 2)
+                        break
+            except Exception:
                 continue
 
-            # Detect keyframes where point or handles are selected
-            selected_kps = [
-                k for k in keyframes
-                if getattr(k, "select_control_point", False)
-                or getattr(k, "select_left_handle", False)
-                or getattr(k, "select_right_handle", False)
-            ]
-
-            if len(selected_kps) >= 2:
-                selected_kps = sorted(selected_kps, key=lambda kp: kp.co[0])
-                k0 = selected_kps[0]
-                k1 = selected_kps[-1]
-                if k0 != k1:
-                    active_fc = fc
-                    # Store this as the tracked pair
-                    _TRACKED_FC = fc
-                    _TRACKED_K0_FRAME = round(k0.co[0], 2)
-                    _TRACKED_K1_FRAME = round(k1.co[0], 2)
-                    break
-
-        # --- 2. Fall back to tracked pair if no new selection found ---
-        if not k0 or not k1:
-            if _TRACKED_FC is not None and _TRACKED_K0_FRAME is not None:
+        # --- 2. Fall back to tracked pair if user is editing a handle (selection < 2) ---
+        if (not k0 or not k1) and _TRACKED_DATA_PATH is not None and _TRACKED_K0_FRAME is not None:
+            # Find the live F-Curve matching our tracked identity from current candidates
+            for fc in candidate_fcurves:
                 try:
-                    k0 = _find_keyframe_at_frame(_TRACKED_FC, _TRACKED_K0_FRAME)
-                    k1 = _find_keyframe_at_frame(_TRACKED_FC, _TRACKED_K1_FRAME)
-                    active_fc = _TRACKED_FC
+                    if getattr(fc, "data_path", "") == _TRACKED_DATA_PATH and getattr(fc, "array_index", 0) == _TRACKED_ARRAY_INDEX:
+                        cand_k0 = _find_keyframe_at_frame(fc, _TRACKED_K0_FRAME)
+                        cand_k1 = _find_keyframe_at_frame(fc, _TRACKED_K1_FRAME)
+                        if cand_k0 is not None and cand_k1 is not None and cand_k0 != cand_k1:
+                            k0 = cand_k0
+                            k1 = cand_k1
+                            active_fc = fc
+                            # Keep tracked frame positions updated if keyframe was moved along timeline
+                            _TRACKED_K0_FRAME = round(float(k0.co[0]), 2)
+                            _TRACKED_K1_FRAME = round(float(k1.co[0]), 2)
+                            break
                 except Exception:
-                    k0 = k1 = None
+                    continue
 
-        if not k0 or not k1 or k0 == k1:
+        if not k0 or not k1 or k0 == k1 or active_fc is None:
             return
 
-        # --- 3. Build signature and update if changed ---
+        # --- 3. Build signature and update sliders if handles changed ---
         sig = (
-            getattr(active_fc, "data_path", ""),
-            getattr(active_fc, "array_index", 0),
-            round(k0.co[0], 2), round(k0.co[1], 4),
-            round(k0.handle_right[0], 2), round(k0.handle_right[1], 4),
-            round(k1.co[0], 2), round(k1.co[1], 4),
-            round(k1.handle_left[0], 2), round(k1.handle_left[1], 4)
+            _TRACKED_DATA_PATH,
+            _TRACKED_ARRAY_INDEX,
+            round(float(k0.co[0]), 2), round(float(k0.co[1]), 4),
+            round(float(k0.handle_right[0]), 2), round(float(k0.handle_right[1]), 4),
+            round(float(k1.co[0]), 2), round(float(k1.co[1]), 4),
+            round(float(k1.handle_left[0]), 2), round(float(k1.handle_left[1]), 4)
         )
 
         if sig != _LAST_SELECTION_SIG:
