@@ -243,18 +243,29 @@ class SM_OT_KeyProperty(bpy.types.Operator):
 
     data_path: bpy.props.StringProperty(name="Data Path", default="")
     array_index: bpy.props.IntProperty(name="Array Index", default=-1)
+    owner_id_name: bpy.props.StringProperty(name="Owner ID Name", default="")
+    owner_id_type: bpy.props.StringProperty(name="Owner ID Type", default="")
 
     def execute(self, context):
-        obj = context.active_object
-        if not obj:
-            self.report({'WARNING'}, "No active object.")
-            return {'CANCELLED'}
         if not self.data_path:
             self.report({'WARNING'}, "No data path specified.")
             return {'CANCELLED'}
+
+        frame = context.scene.frame_current
+
+        # 1. Try resolving via stored owner identity
+        owner = _resolve_owner_id(self.owner_id_type, self.owner_id_name)
+
+        # 2. Fallback: try active object
+        if not owner:
+            owner = context.active_object
+
+        if not owner:
+            self.report({'WARNING'}, "No owner data block found.")
+            return {'CANCELLED'}
+
         try:
-            frame = context.scene.frame_current
-            obj.keyframe_insert(
+            owner.keyframe_insert(
                 data_path=self.data_path,
                 index=self.array_index,
                 frame=frame
@@ -264,6 +275,32 @@ class SM_OT_KeyProperty(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Could not insert keyframe: {e}")
             return {'CANCELLED'}
+
+
+def _resolve_owner_id(id_type, id_name):
+    """Resolve a Blender ID data block by type string and name."""
+    if not id_type or not id_name:
+        return None
+    type_map = {
+        'OBJECT': bpy.data.objects,
+        'MESH': bpy.data.meshes,
+        'MATERIAL': bpy.data.materials,
+        'WORLD': bpy.data.worlds,
+        'CAMERA': bpy.data.cameras,
+        'LIGHT': bpy.data.lights,
+        'CURVE': bpy.data.curves,
+        'ARMATURE': bpy.data.armatures,
+        'LATTICE': bpy.data.lattices,
+        'SPEAKER': bpy.data.speakers,
+        'SCENE': bpy.data.scenes,
+        'NODETREE': bpy.data.node_groups,
+        'KEY': bpy.data.shape_keys if hasattr(bpy.data, 'shape_keys') else None,
+        'PARTICLE': bpy.data.particles if hasattr(bpy.data, 'particles') else None,
+    }
+    collection = type_map.get(id_type)
+    if collection is not None:
+        return collection.get(id_name)
+    return None
 
 
 class SM_OT_ToggleCurveSolo(bpy.types.Operator):

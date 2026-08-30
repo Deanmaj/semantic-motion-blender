@@ -118,7 +118,7 @@ def check_selection_timer():
 
 def _get_active_fcurve(context):
     """Return the active or first selected editable fcurve, or None."""
-    # 1. Direct context attributes
+    # 1. Direct context attributes (Graph Editor / Dope Sheet provide these)
     for attr in ("active_editable_fcurve", "selected_editable_fcurves"):
         val = getattr(context, attr, None)
         if val:
@@ -144,6 +144,63 @@ def _get_active_fcurve(context):
             return all_curves[0]
 
     return None
+
+
+def _iter_all_animated_ids():
+    """
+    Yield (id_block, id_type_str) for every Blender ID data block that has
+    animation_data with an action. This covers objects, materials, worlds,
+    cameras, lights, node trees, meshes, shape keys, scenes, etc.
+    """
+    id_collections = [
+        (bpy.data.objects,     'OBJECT'),
+        (bpy.data.materials,   'MATERIAL'),
+        (bpy.data.worlds,      'WORLD'),
+        (bpy.data.cameras,     'CAMERA'),
+        (bpy.data.lights,      'LIGHT'),
+        (bpy.data.node_groups, 'NODETREE'),
+        (bpy.data.meshes,      'MESH'),
+        (bpy.data.curves,      'CURVE'),
+        (bpy.data.armatures,   'ARMATURE'),
+        (bpy.data.lattices,    'LATTICE'),
+        (bpy.data.scenes,      'SCENE'),
+    ]
+    if hasattr(bpy.data, 'speakers'):
+        id_collections.append((bpy.data.speakers, 'SPEAKER'))
+
+    for collection, id_type in id_collections:
+        try:
+            for block in collection:
+                anim_data = getattr(block, "animation_data", None)
+                if anim_data and getattr(anim_data, "action", None):
+                    yield block, id_type
+        except Exception:
+            pass
+
+    # Shape keys live on mesh/curve data
+    if hasattr(bpy.data, 'shape_keys'):
+        try:
+            for sk in bpy.data.shape_keys:
+                anim_data = getattr(sk, "animation_data", None)
+                if anim_data and getattr(anim_data, "action", None):
+                    yield sk, 'KEY'
+        except Exception:
+            pass
+
+
+def _find_fcurve_owner(fc):
+    """
+    Given an F-Curve, find the ID data block that owns it by searching all
+    animated data blocks. Returns (id_block, id_type_str) or (None, None).
+    """
+    from ..operators.apply_semantic_curve import extract_curves_from_action
+    for block, id_type in _iter_all_animated_ids():
+        action = block.animation_data.action
+        curves = extract_curves_from_action(action)
+        for c in curves:
+            if c == fc:
+                return block, id_type
+    return None, None
 
 
 def _fcurve_channel_label(fc, owner=None):
@@ -176,45 +233,160 @@ def _fcurve_channel_label(fc, owner=None):
     return pretty
 
 
-def draw_live_property(layout, context):
+def _resolve_fcurve_prop(fc, id_block):
     """
-    Render the live value of the active fcurve's property as a native Blender
-    widget (number field, dropdown, colour, etc.) with Eye Solo & Auto-Key buttons.
+    Resolve an F-Curve's data_path against a known ID data block to get:
+    (owner, prop_attr_name, channel_label).
+    Returns (None, None, None) on failure.
     """
-    box = layout.box()
-
-    obj = getattr(context, "active_object", None)
-    fc = _get_active_fcurve(context)
-
-    if not fc or not obj:
-        box.label(text="Select an F-Curve Channel", icon='INFO')
-        return
-
     data_path = fc.data_path
-    array_index = fc.array_index
 
     try:
         if "." in data_path:
             owner_path, prop_attr = data_path.rsplit(".", 1)
             try:
-                owner = obj.path_resolve(owner_path)
+                owner = id_block.path_resolve(owner_path)
             except Exception:
-                owner = obj
+                owner = id_block
                 prop_attr = data_path
         else:
-            owner = obj
+            owner = id_block
             prop_attr = data_path
 
         if "[" in prop_attr:
             prop_attr = prop_attr[:prop_attr.index("[")]
 
         channel_label = _fcurve_channel_label(fc, owner)
+        return owner, prop_attr, channel_label
+    except Exception:
+        return None, None, None
+
+
+def draw_live_property(layout, context):
+    """
+    Render the live value of the active fcurve's property as a native Blender
+    widget (number field, dropdown, colour, etc.) with Eye Solo & Auto-Key buttons.
+    Supports properties on any data block: objects, materials, worlds, cameras,
+    lights, node trees, shape keys, etc.
+    """
+    box = layout.box()
+
+    fc = _get_active_fcurve(context)
+
+    if not fc:
+        box.label(text="Select an F-Curve Channel", icon='INFO')
+        return
+
+    data_path = fc.data_path
+    array_index = fc.array_index
+
+    # --- Discover the owner ID data block ---
+    # 1. Try active object first (most common case)
+    obj = getattr(context, "active_object", None)
+    id_block = None
+    id_type = ''
+
+    if obj:
+        # Try direct resolution on the object
+        try:
+            if "." in data_path:
+                obj.path_resolve(data_path.rsplit(".", 1)[0])
+            else:
+                obj.path_resolve(data_path)
+            id_block = obj
+            id_type = 'OBJECT'
+        except Exception:
+            pass
+
+        # Try object's mesh/curve data (shape keys, modifiers)
+        if not id_block and getattr(obj, "data", None):
+            try:
+                obj_data = obj.data
+                if "." in data_path:
+                    obj_data.path_resolve(data_path.rsplit(".", 1)[0])
+                else:
+                    obj_data.path_resolve(data_path)
+                id_block = obj_data
+                id_type = type(obj_data).__name__.upper()
+            except Exception:
+                pass
+
+        # Try object's material slots
+        if not id_block:
+            for slot in getattr(obj, "material_slots", []):
+                mat = getattr(slot, "material", None)
+                if mat:
+                    try:
+                        if "." in data_path:
+                            mat.path_resolve(data_path.rsplit(".", 1)[0])
+                        else:
+                            mat.path_resolve(data_path)
+                        id_block = mat
+                        id_type = 'MATERIAL'
+                        break
+                    except Exception:
+                        pass
+
+    # 2. Try world
+    if not id_block:
+        world = getattr(context.scene, "world", None)
+        if world:
+            try:
+                if "." in data_path:
+                    world.path_resolve(data_path.rsplit(".", 1)[0])
+                else:
+                    world.path_resolve(data_path)
+                id_block = world
+                id_type = 'WORLD'
+            except Exception:
+                pass
+
+    # 3. Try scene
+    if not id_block:
+        try:
+            scene = context.scene
+            if "." in data_path:
+                scene.path_resolve(data_path.rsplit(".", 1)[0])
+            else:
+                scene.path_resolve(data_path)
+            id_block = scene
+            id_type = 'SCENE'
+        except Exception:
+            pass
+
+    # 4. Exhaustive search across all animated data blocks
+    if not id_block:
+        id_block, id_type = _find_fcurve_owner(fc)
+
+    # 5. Last resort: active object
+    if not id_block:
+        id_block = obj
+        id_type = 'OBJECT'
+
+    if not id_block:
+        box.label(text="Select an F-Curve Channel", icon='INFO')
+        return
+
+    try:
+        owner, prop_attr, channel_label = _resolve_fcurve_prop(fc, id_block)
+
+        if not owner or not prop_attr:
+            box.label(text=data_path, icon='PROPERTIES')
+            return
 
         # Check isolation / solo status of curves
         all_curves = []
-        if getattr(obj, "animation_data", None) and getattr(obj.animation_data, "action", None):
+        # Gather curves from the id_block's action
+        if getattr(id_block, "animation_data", None) and getattr(id_block.animation_data, "action", None):
             from ..operators.apply_semantic_curve import extract_curves_from_action
-            all_curves = extract_curves_from_action(obj.animation_data.action)
+            all_curves = extract_curves_from_action(id_block.animation_data.action)
+        # Also check active object if different
+        if obj and obj != id_block and getattr(obj, "animation_data", None) and getattr(obj.animation_data, "action", None):
+            from ..operators.apply_semantic_curve import extract_curves_from_action
+            obj_curves = extract_curves_from_action(obj.animation_data.action)
+            for c in obj_curves:
+                if c not in all_curves:
+                    all_curves.append(c)
 
         selected_curves = [c for c in all_curves if getattr(c, "select", False)]
         if fc not in selected_curves:
@@ -225,14 +397,12 @@ def draw_live_property(layout, context):
         target_hidden = getattr(fc, "hide", False)
 
         is_soloed = (not target_hidden and any_unselected_hidden)
-        # Dedicated Blender Eye icons: HIDE_OFF (Open Eye), HIDE_ON (Closed Eye)
         eye_icon = 'HIDE_OFF' if not target_hidden else 'HIDE_ON'
 
         # Header row: Clean channel name + Eye Solo button
         hdr = box.row(align=True)
         hdr.label(text=channel_label, icon='ANIM_DATA')
 
-        # Eye icon in the header row
         solo_op = hdr.operator(
             "semantic_motion.toggle_curve_solo",
             text="",
@@ -252,7 +422,7 @@ def draw_live_property(layout, context):
             except Exception:
                 val_row.label(text=f"Frame: {context.scene.frame_current}")
 
-        # Manual key-here button
+        # Manual key-here button with owner identity
         key_op = val_row.operator(
             "semantic_motion.key_property",
             text="",
@@ -260,6 +430,8 @@ def draw_live_property(layout, context):
         )
         key_op.data_path = data_path
         key_op.array_index = array_index
+        key_op.owner_id_name = getattr(id_block, "name", "")
+        key_op.owner_id_type = id_type
 
         # Auto-keying toggle beside the Key Property button
         val_row.prop(
