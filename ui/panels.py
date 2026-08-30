@@ -1,9 +1,12 @@
 """
 UI Panels for Semantic Motion Add-on.
-Independent top-level collapsible panels:
+Strict 3-tab collapsible layout:
   1. Phase Builder (Speed Sliders, Live Link, Live Property widget)
   2. Curve Utilities (Scope, Copy/Paste Ease, 2-line Motion Flow, Anticipation Dip & Overshoot Rebound)
   3. Natural Motion Descriptor (Natural Language text prompt & presets)
+
+Features background selection timer for instantaneous auto-updating of speed sliders
+when 2 keyframes or an F-curve interval is selected.
 """
 
 import bpy
@@ -16,15 +19,20 @@ _LAST_SELECTION_SIG = None
 
 
 # ---------------------------------------------------------------------------
-# Auto-sync: reads selected handles -> updates sliders silently, no curve edit
+# Auto-sync: Evaluates strictly when 2 keyframes are selected
 # ---------------------------------------------------------------------------
 
-def auto_sync_selection_to_sliders(context, props):
+def sync_selected_keyframe_pair(context, props):
+    """
+    Reads selected keyframes and automatically updates Start & End speed sliders.
+    Only updates when at least 2 keyframes are selected so that start (k0) and
+    end (k1) can be definitively ordered by time.
+    """
     global _LAST_SELECTION_SIG
     if properties._IS_SYNCING:
         return
+
     try:
-        # Find candidate fcurves (active fcurve first, or selected editable fcurves)
         target_fcurve = _get_active_fcurve(context)
         candidate_fcurves = []
         if target_fcurve:
@@ -43,66 +51,54 @@ def auto_sync_selection_to_sliders(context, props):
 
             selected_kps = [k for k in keyframes if getattr(k, "select_control_point", False)]
 
-            k0, k1 = None, None
-            if len(selected_kps) >= 2:
-                # User selected 2 or more keyframes
-                k0, k1 = selected_kps[0], selected_kps[1]
-            elif len(selected_kps) == 1:
-                # User selected 1 keyframe: pick the interval adjacent to it
-                sel_kp = selected_kps[0]
-                idx = -1
-                for i, kp in enumerate(keyframes):
-                    if kp == sel_kp or (abs(kp.co[0] - sel_kp.co[0]) < 0.001 and abs(kp.co[1] - sel_kp.co[1]) < 0.001):
-                        idx = i
-                        break
-                if idx >= 0:
-                    if idx < len(keyframes) - 1:
-                        k0, k1 = keyframes[idx], keyframes[idx + 1]
-                    elif idx > 0:
-                        k0, k1 = keyframes[idx - 1], keyframes[idx]
-            else:
-                # User selected/clicked the fcurve channel (no explicit keyframes selected)
-                # Find keyframe pair around the current timeline frame
-                curr_frame = getattr(context.scene, "frame_current", 0)
-                prev_kps = [k for k in keyframes if k.co[0] <= curr_frame]
-                next_kps = [k for k in keyframes if k.co[0] > curr_frame]
-                if prev_kps and next_kps:
-                    k0 = prev_kps[-1]
-                    k1 = next_kps[0]
-                elif prev_kps and len(prev_kps) >= 2:
-                    k0 = prev_kps[-2]
-                    k1 = prev_kps[-1]
-                elif next_kps and len(next_kps) >= 2:
-                    k0 = next_kps[0]
-                    k1 = next_kps[1]
-                else:
-                    k0 = keyframes[0]
-                    k1 = keyframes[1]
+            # Only proceed if 2 or more keyframes are selected
+            if len(selected_kps) < 2:
+                continue
 
-            if k0 and k1 and k0 != k1:
-                sig = (
-                    getattr(fc, "data_path", ""),
-                    getattr(fc, "array_index", 0),
-                    round(k0.co[0], 2), round(k0.co[1], 4),
-                    round(k0.handle_right[0], 2), round(k0.handle_right[1], 4),
-                    round(k1.co[0], 2), round(k1.co[1], 4),
-                    round(k1.handle_left[0], 2), round(k1.handle_left[1], 4)
-                )
-                if sig != _LAST_SELECTION_SIG:
-                    _LAST_SELECTION_SIG = sig
-                    res = analyze_keyframe_pair(k0, k1)
-                    properties._IS_SYNCING = True
-                    try:
-                        props.start_speed = res.get("start_speed", 20.0)
-                        props.end_speed = res.get("end_speed", 80.0)
-                        props.anticipation_amount = res.get("anticipation_amount", 0.0)
-                        props.overshoot_amount = res.get("overshoot_amount_pct", 0.0)
-                        update_slider(props, context)
-                    finally:
-                        properties._IS_SYNCING = False
-                break
+            # Sort by frame position so k0 is strictly start and k1 is strictly end
+            selected_kps = sorted(selected_kps, key=lambda kp: kp.co[0])
+            k0 = selected_kps[0]
+            k1 = selected_kps[1]
+
+            if k0 == k1:
+                continue
+
+            sig = (
+                getattr(fc, "data_path", ""),
+                getattr(fc, "array_index", 0),
+                round(k0.co[0], 2), round(k0.co[1], 4),
+                round(k0.handle_right[0], 2), round(k0.handle_right[1], 4),
+                round(k1.co[0], 2), round(k1.co[1], 4),
+                round(k1.handle_left[0], 2), round(k1.handle_left[1], 4)
+            )
+
+            if sig != _LAST_SELECTION_SIG:
+                _LAST_SELECTION_SIG = sig
+                res = analyze_keyframe_pair(k0, k1)
+                properties._IS_SYNCING = True
+                try:
+                    props.start_speed = res.get("start_speed", 20.0)
+                    props.end_speed = res.get("end_speed", 80.0)
+                    props.anticipation_amount = res.get("anticipation_amount", 0.0)
+                    props.overshoot_amount = res.get("overshoot_amount_pct", 0.0)
+                    update_slider(props, context)
+                finally:
+                    properties._IS_SYNCING = False
+            break
     except Exception:
         pass
+
+
+def check_selection_timer():
+    """Background timer to safely check selection outside the restricted UI draw loop."""
+    try:
+        context = bpy.context
+        scene = getattr(context, "scene", None)
+        if scene and hasattr(scene, "semantic_motion"):
+            sync_selected_keyframe_pair(context, scene.semantic_motion)
+    except Exception:
+        pass
+    return 0.08  # Run every 80ms for instant responsiveness
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +111,6 @@ def _get_active_fcurve(context):
         val = getattr(context, attr, None)
         if val:
             return val if not hasattr(val, "__iter__") else next(iter(val), None)
-    # Fall back: search active object's action
     obj = getattr(context, "active_object", None)
     if obj and obj.animation_data and obj.animation_data.action:
         from ..operators.apply_semantic_curve import extract_curves_from_action
@@ -158,7 +153,7 @@ def _fcurve_channel_label(fc, owner=None):
 def draw_live_property(layout, context):
     """
     Render the live value of the active fcurve's property as a native Blender
-    widget (number field, dropdown, colour, etc.) without any 'Property:' prefix.
+    widget (number field, dropdown, colour, etc.) with NO 'Property:' prefix.
     """
     box = layout.box()
 
@@ -185,7 +180,7 @@ def draw_live_property(layout, context):
 
         channel_label = _fcurve_channel_label(fc, owner)
 
-        # Header row: Clean channel name (no "Property:" prefix) + auto-key toggle
+        # Header row: Clean channel name + auto-key toggle
         hdr = box.row(align=True)
         hdr.label(text=channel_label, icon='ANIM_DATA')
         hdr.prop(
@@ -221,8 +216,6 @@ def draw_live_property(layout, context):
 
 def draw_phase_builder(layout, context, props):
     """Phase Builder panel — speed sliders, live link, live property widget."""
-    auto_sync_selection_to_sliders(context, props)
-
     # Live Link toggle
     layout.prop(props, "live_update", text="Live Link", icon='LINKED')
     layout.separator(factor=0.4)
@@ -262,8 +255,6 @@ def draw_phase_builder(layout, context, props):
 
 def draw_curve_utilities(layout, context, props):
     """Curve Utilities panel — Scope, Copy/Paste Ease, 2-line Motion Flow, Dip & Rebound."""
-    auto_sync_selection_to_sliders(context, props)
-
     layout.prop(props, "target_scope", text="Scope")
     layout.separator(factor=0.4)
 
@@ -276,7 +267,7 @@ def draw_curve_utilities(layout, context, props):
     layout.separator(factor=0.6)
     layout.label(text="Motion Flow:", icon='INFO')
 
-    # Break motion flow into two lines to prevent ellipsis truncation
+    # 2-line motion flow breakdown so it never truncates with ellipses
     desc = props.parsed_description or "Smooth Motion"
     if " — " in desc:
         flow_part, style_part = desc.split(" — ", 1)
@@ -322,10 +313,10 @@ def draw_natural_motion(layout, props):
 
 
 # ===========================================================================
-#  GRAPH EDITOR — 3 independent collapsible panels in requested order
+#  GRAPH EDITOR — Explicitly ordered panels (1_phase_builder, 2_curve_utils, 3_natural_motion)
 # ===========================================================================
 
-class GRAPH_EDITOR_PT_SM_PhaseBuilder(bpy.types.Panel):
+class GRAPH_EDITOR_PT_semantic_motion_1_phase_builder(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -336,7 +327,7 @@ class GRAPH_EDITOR_PT_SM_PhaseBuilder(bpy.types.Panel):
         draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
-class GRAPH_EDITOR_PT_SM_CurveUtils(bpy.types.Panel):
+class GRAPH_EDITOR_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -348,7 +339,7 @@ class GRAPH_EDITOR_PT_SM_CurveUtils(bpy.types.Panel):
         draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
-class GRAPH_EDITOR_PT_SM_NaturalMotion(bpy.types.Panel):
+class GRAPH_EDITOR_PT_semantic_motion_3_natural_motion(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -361,10 +352,10 @@ class GRAPH_EDITOR_PT_SM_NaturalMotion(bpy.types.Panel):
 
 
 # ===========================================================================
-#  DOPE SHEET — 3 independent collapsible panels in requested order
+#  DOPE SHEET — Explicitly ordered panels
 # ===========================================================================
 
-class DOPESHEET_PT_SM_PhaseBuilder(bpy.types.Panel):
+class DOPESHEET_PT_semantic_motion_1_phase_builder(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -375,7 +366,7 @@ class DOPESHEET_PT_SM_PhaseBuilder(bpy.types.Panel):
         draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
-class DOPESHEET_PT_SM_CurveUtils(bpy.types.Panel):
+class DOPESHEET_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -387,7 +378,7 @@ class DOPESHEET_PT_SM_CurveUtils(bpy.types.Panel):
         draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
-class DOPESHEET_PT_SM_NaturalMotion(bpy.types.Panel):
+class DOPESHEET_PT_semantic_motion_3_natural_motion(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -400,10 +391,10 @@ class DOPESHEET_PT_SM_NaturalMotion(bpy.types.Panel):
 
 
 # ===========================================================================
-#  3D VIEWPORT — 3 independent collapsible panels in requested order
+#  3D VIEWPORT — Explicitly ordered panels
 # ===========================================================================
 
-class VIEW3D_PT_SM_PhaseBuilder(bpy.types.Panel):
+class VIEW3D_PT_semantic_motion_1_phase_builder(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -414,7 +405,7 @@ class VIEW3D_PT_SM_PhaseBuilder(bpy.types.Panel):
         draw_phase_builder(self.layout, context, context.scene.semantic_motion)
 
 
-class VIEW3D_PT_SM_CurveUtils(bpy.types.Panel):
+class VIEW3D_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -423,10 +414,10 @@ class VIEW3D_PT_SM_CurveUtils(bpy.types.Panel):
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_curve_utilities(self.layout, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
-class VIEW3D_PT_SM_NaturalMotion(bpy.types.Panel):
+class VIEW3D_PT_semantic_motion_3_natural_motion(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
@@ -444,25 +435,29 @@ class VIEW3D_PT_SM_NaturalMotion(bpy.types.Panel):
 
 classes = (
     # Graph Editor
-    GRAPH_EDITOR_PT_SM_PhaseBuilder,
-    GRAPH_EDITOR_PT_SM_CurveUtils,
-    GRAPH_EDITOR_PT_SM_NaturalMotion,
+    GRAPH_EDITOR_PT_semantic_motion_1_phase_builder,
+    GRAPH_EDITOR_PT_semantic_motion_2_curve_utils,
+    GRAPH_EDITOR_PT_semantic_motion_3_natural_motion,
     # Dope Sheet
-    DOPESHEET_PT_SM_PhaseBuilder,
-    DOPESHEET_PT_SM_CurveUtils,
-    DOPESHEET_PT_SM_NaturalMotion,
+    DOPESHEET_PT_semantic_motion_1_phase_builder,
+    DOPESHEET_PT_semantic_motion_2_curve_utils,
+    DOPESHEET_PT_semantic_motion_3_natural_motion,
     # 3D Viewport
-    VIEW3D_PT_SM_PhaseBuilder,
-    VIEW3D_PT_SM_CurveUtils,
-    VIEW3D_PT_SM_NaturalMotion,
+    VIEW3D_PT_semantic_motion_1_phase_builder,
+    VIEW3D_PT_semantic_motion_2_curve_utils,
+    VIEW3D_PT_semantic_motion_3_natural_motion,
 )
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    if hasattr(bpy.app, "timers") and not bpy.app.timers.is_registered(check_selection_timer):
+        bpy.app.timers.register(check_selection_timer, persistent=True)
 
 
 def unregister():
+    if hasattr(bpy.app, "timers") and bpy.app.timers.is_registered(check_selection_timer):
+        bpy.app.timers.unregister(check_selection_timer)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
