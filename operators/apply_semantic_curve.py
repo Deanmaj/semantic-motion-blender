@@ -272,9 +272,19 @@ class SM_OT_KeyProperty(bpy.types.Operator):
             )
             self.report({'INFO'}, f"Keyframe inserted at frame {frame}.")
             return {'FINISHED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Could not insert keyframe: {e}")
-            return {'CANCELLED'}
+        except Exception:
+            # Property may not be an array (enums, booleans, single floats) —
+            # retry without index
+            try:
+                owner.keyframe_insert(
+                    data_path=self.data_path,
+                    frame=frame
+                )
+                self.report({'INFO'}, f"Keyframe inserted at frame {frame}.")
+                return {'FINISHED'}
+            except Exception as e:
+                self.report({'ERROR'}, f"Could not insert keyframe: {e}")
+                return {'CANCELLED'}
 
 
 def _resolve_owner_id(id_type, id_name):
