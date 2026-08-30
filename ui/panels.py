@@ -19,21 +19,38 @@ from ..operators.apply_semantic_curve import get_target_fcurves
 from ..properties import update_slider
 from .. import properties
 
+
 _LAST_SELECTION_SIG = None
+# Persistent tracked pair — survives handle grabs that deselect control points
+_TRACKED_FC = None          # The fcurve object
+_TRACKED_K0_FRAME = None    # Frame number of first keyframe
+_TRACKED_K1_FRAME = None    # Frame number of second keyframe
 
 
 # ---------------------------------------------------------------------------
 # Auto-sync: Evaluates strictly when 2 keyframes are selected
 # ---------------------------------------------------------------------------
 
+def _find_keyframe_at_frame(fc, frame):
+    """Find a keyframe on the given fcurve at the given frame number (±0.5 tolerance)."""
+    keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
+    for k in keyframes:
+        if abs(k.co[0] - frame) < 0.5:
+            return k
+    return None
+
+
 def sync_selected_keyframe_pair(context, props):
     """
     Reads selected keyframes and automatically updates Start & End speed sliders,
     Anticipation Dip, Overshoot Rebound, and Motion Flow.
-    Only updates when at least 2 keyframes are selected so that start (k0) and
-    end (k1) can be definitively ordered by time.
+
+    When 2+ keyframes are selected, uses them as the active pair AND stores them.
+    When fewer are selected (e.g. user is dragging a bezier handle), falls back
+    to the stored pair and keeps updating from their current handle positions.
+    Only clears the stored pair when a genuinely new pair is selected.
     """
-    global _LAST_SELECTION_SIG
+    global _LAST_SELECTION_SIG, _TRACKED_FC, _TRACKED_K0_FRAME, _TRACKED_K1_FRAME
     if properties._IS_SYNCING:
         return
 
@@ -49,6 +66,11 @@ def sync_selected_keyframe_pair(context, props):
         if not candidate_fcurves:
             return
 
+        # --- 1. Try to find a new pair from current selection ---
+        k0 = None
+        k1 = None
+        active_fc = None
+
         for fc in candidate_fcurves:
             keyframes = getattr(fc, "keyframe_points", getattr(fc, "points", []))
             if not keyframes or len(keyframes) < 2:
@@ -62,40 +84,53 @@ def sync_selected_keyframe_pair(context, props):
                 or getattr(k, "select_right_handle", False)
             ]
 
-            # Strictly require 2 or more selected keyframes
-            if len(selected_kps) < 2:
-                continue
+            if len(selected_kps) >= 2:
+                selected_kps = sorted(selected_kps, key=lambda kp: kp.co[0])
+                k0 = selected_kps[0]
+                k1 = selected_kps[-1]
+                if k0 != k1:
+                    active_fc = fc
+                    # Store this as the tracked pair
+                    _TRACKED_FC = fc
+                    _TRACKED_K0_FRAME = round(k0.co[0], 2)
+                    _TRACKED_K1_FRAME = round(k1.co[0], 2)
+                    break
 
-            # Sort chronologically: k0 is strictly start, k1 is strictly end
-            selected_kps = sorted(selected_kps, key=lambda kp: kp.co[0])
-            k0 = selected_kps[0]
-            k1 = selected_kps[1]
-
-            if k0 == k1:
-                continue
-
-            sig = (
-                getattr(fc, "data_path", ""),
-                getattr(fc, "array_index", 0),
-                round(k0.co[0], 2), round(k0.co[1], 4),
-                round(k0.handle_right[0], 2), round(k0.handle_right[1], 4),
-                round(k1.co[0], 2), round(k1.co[1], 4),
-                round(k1.handle_left[0], 2), round(k1.handle_left[1], 4)
-            )
-
-            if sig != _LAST_SELECTION_SIG:
-                _LAST_SELECTION_SIG = sig
-                res = analyze_keyframe_pair(k0, k1)
-                properties._IS_SYNCING = True
+        # --- 2. Fall back to tracked pair if no new selection found ---
+        if not k0 or not k1:
+            if _TRACKED_FC is not None and _TRACKED_K0_FRAME is not None:
                 try:
-                    props.start_speed = res.get("start_speed", 20.0)
-                    props.end_speed = res.get("end_speed", 80.0)
-                    props.anticipation_amount = res.get("anticipation_amount", 0.0)
-                    props.overshoot_amount = res.get("overshoot_amount_pct", 0.0)
-                    update_slider(props, context)
-                finally:
-                    properties._IS_SYNCING = False
-            break
+                    k0 = _find_keyframe_at_frame(_TRACKED_FC, _TRACKED_K0_FRAME)
+                    k1 = _find_keyframe_at_frame(_TRACKED_FC, _TRACKED_K1_FRAME)
+                    active_fc = _TRACKED_FC
+                except Exception:
+                    k0 = k1 = None
+
+        if not k0 or not k1 or k0 == k1:
+            return
+
+        # --- 3. Build signature and update if changed ---
+        sig = (
+            getattr(active_fc, "data_path", ""),
+            getattr(active_fc, "array_index", 0),
+            round(k0.co[0], 2), round(k0.co[1], 4),
+            round(k0.handle_right[0], 2), round(k0.handle_right[1], 4),
+            round(k1.co[0], 2), round(k1.co[1], 4),
+            round(k1.handle_left[0], 2), round(k1.handle_left[1], 4)
+        )
+
+        if sig != _LAST_SELECTION_SIG:
+            _LAST_SELECTION_SIG = sig
+            res = analyze_keyframe_pair(k0, k1)
+            properties._IS_SYNCING = True
+            try:
+                props.start_speed = res.get("start_speed", 20.0)
+                props.end_speed = res.get("end_speed", 80.0)
+                props.anticipation_amount = res.get("anticipation_amount", 0.0)
+                props.overshoot_amount = res.get("overshoot_amount_pct", 0.0)
+                update_slider(props, context)
+            finally:
+                properties._IS_SYNCING = False
     except Exception:
         pass
 
