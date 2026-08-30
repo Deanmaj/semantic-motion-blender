@@ -3,7 +3,7 @@ UI Panels for Semantic Motion Add-on.
 Strict 4-tab collapsible layout:
   1. Phase Builder (Speed Sliders, Live Link, Live Property widget)
   2. Curve Utilities (Scope, Copy/Paste Ease, Anticipation Dip & Overshoot Rebound)
-  3. Motion Graph (Graphical Curve Preview & Non-truncated Line-by-Line Motion Flow)
+  3. Motion Flow (Clickable Value & Speed Graph Tabs, Vertical Resolution, Detailed Metrics)
   4. Natural Motion Descriptor (Natural Language text prompt & presets)
 
 Features background selection timer for instantaneous auto-updating of speed sliders,
@@ -13,7 +13,7 @@ dip, rebound, and motion flow when 2 keyframes are selected.
 import bpy
 from ..engine.curve_analyzer import analyze_keyframe_pair
 from ..engine.bezier_math import motion_tools_slider_to_bezier
-from .curve_preview import render_high_res_curve
+from .curve_preview import render_high_res_curve, render_speed_graph
 from ..operators.apply_semantic_curve import get_target_fcurves
 from ..properties import update_slider
 from .. import properties
@@ -281,9 +281,14 @@ def draw_curve_utilities(layout, context, props):
     layout.prop(props, "overshoot_amount",    slider=True, text="Overshoot Rebound")
 
 
-def draw_motion_graph(layout, props):
-    """Motion Graph panel — Graphical Curve Preview & Detailed Line-by-Line Motion Flow."""
-    # 1. Un-commented Graphical Curve Preview
+def draw_motion_flow(layout, props):
+    """Motion Flow panel — Clickable Value & Speed Graph Tabs and Non-Truncated Metrics."""
+    # 1. Clickable View Tabs (Value Graph vs Speed Graph)
+    tabs_row = layout.row(align=True)
+    tabs_row.prop(props, "graph_type", expand=True)
+    layout.separator(factor=0.3)
+
+    # 2. Enhanced High-Resolution Graphical Curve with Vertical Height (8 rows = 32 subpixels)
     try:
         bezier = motion_tools_slider_to_bezier(
             props.start_speed,
@@ -291,10 +296,14 @@ def draw_motion_graph(layout, props):
             props.anticipation_amount / 100.0,
             props.overshoot_amount / 100.0
         )
-        graph_lines = render_high_res_curve(bezier, char_width=20, char_height=5)
+        if getattr(props, "graph_type", 'VALUE') == 'SPEED':
+            graph_lines = render_speed_graph(bezier, char_width=22, char_height=8)
+        else:
+            graph_lines = render_high_res_curve(bezier, char_width=22, char_height=8)
+
         graph_box = layout.box()
         col = graph_box.column(align=True)
-        col.scale_y = 0.75
+        col.scale_y = 0.85
         for line in graph_lines:
             col.label(text=line)
     except Exception:
@@ -302,9 +311,9 @@ def draw_motion_graph(layout, props):
 
     layout.separator(factor=0.5)
 
-    # 2. Detailed Non-Truncated Motion Flow Breakdown (Each value on its own dedicated line)
+    # 3. Detailed Non-Truncated Metrics with Linebreaks
     flow_box = layout.box()
-    flow_box.label(text="Motion Flow Breakdown:", icon='INFO')
+    flow_col = flow_box.column(align=True)
 
     s = int(props.start_speed)
     e = int(props.end_speed)
@@ -323,16 +332,19 @@ def draw_motion_graph(layout, props):
     else:
         traj = "Steady Linear Progression"
 
-    flow_col = flow_box.column(align=True)
     flow_col.label(text=f"• Start Speed: {s_txt}", icon='IPO_EASE_IN')
     flow_col.label(text=f"• End Speed: {e_txt}", icon='IPO_EASE_OUT')
-    flow_col.label(text=f"• Trajectory: {traj}", icon='FORWARD')
+
+    # Trajectory with explicit line break so it never truncates
+    flow_col.label(text="• Trajectory:", icon='FORWARD')
+    traj_row = flow_col.row()
+    traj_row.label(text=f"   {traj}")
 
     if props.anticipation_amount > 0.5:
-        flow_col.label(text=f"• Anticipation: Dip ({int(props.anticipation_amount)}% pullback)", icon='IPO_BACK')
+        flow_col.label(text=f"• Anticipation Dip: {int(props.anticipation_amount)}% pullback", icon='IPO_BACK')
 
     if props.overshoot_amount > 0.5:
-        flow_col.label(text=f"• Overshoot: Rebound (+{int(props.overshoot_amount)}% rebound)", icon='IPO_BACK')
+        flow_col.label(text=f"• Overshoot Rebound: +{int(props.overshoot_amount)}% overshoot", icon='IPO_BACK')
 
 
 def draw_natural_motion(layout, props):
@@ -384,16 +396,16 @@ class GRAPH_EDITOR_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
         draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
 
 
-class GRAPH_EDITOR_PT_semantic_motion_3_motion_graph(bpy.types.Panel):
+class GRAPH_EDITOR_PT_semantic_motion_3_motion_flow(bpy.types.Panel):
     bl_space_type  = 'GRAPH_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Motion Graph'
+    bl_label       = 'Motion Flow'
     bl_order       = 2
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_motion_graph(self.layout, context.scene.semantic_motion)
+        draw_motion_flow(self.layout, context.scene.semantic_motion)
 
 
 class GRAPH_EDITOR_PT_semantic_motion_4_natural_motion(bpy.types.Panel):
@@ -432,19 +444,19 @@ class DOPESHEET_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_curve_utilities(self.layout, context, context.scene.semantic_motion)
+        draw_curve_utilities(self.layout, context.scene.semantic_motion)
 
 
-class DOPESHEET_PT_semantic_motion_3_motion_graph(bpy.types.Panel):
+class DOPESHEET_PT_semantic_motion_3_motion_flow(bpy.types.Panel):
     bl_space_type  = 'DOPESHEET_EDITOR'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Motion Graph'
+    bl_label       = 'Motion Flow'
     bl_order       = 2
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_motion_graph(self.layout, context.scene.semantic_motion)
+        draw_motion_flow(self.layout, context.scene.semantic_motion)
 
 
 class DOPESHEET_PT_semantic_motion_4_natural_motion(bpy.types.Panel):
@@ -486,16 +498,16 @@ class VIEW3D_PT_semantic_motion_2_curve_utils(bpy.types.Panel):
         draw_curve_utilities(self.layout, context.scene.semantic_motion)
 
 
-class VIEW3D_PT_semantic_motion_3_motion_graph(bpy.types.Panel):
+class VIEW3D_PT_semantic_motion_3_motion_flow(bpy.types.Panel):
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category    = 'Semantic Motion'
-    bl_label       = 'Motion Graph'
+    bl_label       = 'Motion Flow'
     bl_order       = 2
     bl_options     = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        draw_motion_graph(self.layout, context.scene.semantic_motion)
+        draw_motion_flow(self.layout, context.scene.semantic_motion)
 
 
 class VIEW3D_PT_semantic_motion_4_natural_motion(bpy.types.Panel):
@@ -518,17 +530,17 @@ classes = (
     # Graph Editor
     GRAPH_EDITOR_PT_semantic_motion_1_phase_builder,
     GRAPH_EDITOR_PT_semantic_motion_2_curve_utils,
-    GRAPH_EDITOR_PT_semantic_motion_3_motion_graph,
+    GRAPH_EDITOR_PT_semantic_motion_3_motion_flow,
     GRAPH_EDITOR_PT_semantic_motion_4_natural_motion,
     # Dope Sheet
     DOPESHEET_PT_semantic_motion_1_phase_builder,
     DOPESHEET_PT_semantic_motion_2_curve_utils,
-    DOPESHEET_PT_semantic_motion_3_motion_graph,
+    DOPESHEET_PT_semantic_motion_3_motion_flow,
     DOPESHEET_PT_semantic_motion_4_natural_motion,
     # 3D Viewport
     VIEW3D_PT_semantic_motion_1_phase_builder,
     VIEW3D_PT_semantic_motion_2_curve_utils,
-    VIEW3D_PT_semantic_motion_3_motion_graph,
+    VIEW3D_PT_semantic_motion_3_motion_flow,
     VIEW3D_PT_semantic_motion_4_natural_motion,
 )
 

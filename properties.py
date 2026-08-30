@@ -109,6 +109,16 @@ class SemanticMotionProperties(bpy.types.PropertyGroup):
         default=True
     )
 
+    graph_type: EnumProperty(
+        name="Graph View",
+        description="Choose graph visualization type",
+        items=[
+            ('VALUE', "Value Graph", "Shows the positional value curve over time", 'IPO_BEZIER', 0),
+            ('SPEED', "Speed Graph", "Shows velocity / speed progression over time", 'IPO_EASE_IN_OUT', 1),
+        ],
+        default='VALUE'
+    )
+
     prompt_text: StringProperty(
         name="Motion Prompt",
         description="Describe how you want the animation curve to behave (e.g. 'slow start, fast ending', 'explosive start with overshoot')",
